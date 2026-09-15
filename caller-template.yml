@@ -1,0 +1,39 @@
+# Copy this file to .github/workflows/pr-review.yml in the repository to be reviewed.
+# The repository also needs one secret: CLAUDE_CODE_OAUTH_TOKEN.
+#
+# What it does: every opened, reopened, ready-for-review or updated PR is built and
+# tested, then reviewed. Drafts, fork PRs and PRs labelled `no-review` are not run.
+# A new push cancels the review still running for the previous push.
+
+name: PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-review:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !contains(github.event.pull_request.labels.*.name, 'no-review')
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    uses: Designblue-Manila/pr-reviewer/.github/workflows/review.yml@main
+    secrets: inherit
+    # Optional overrides:
+    # with:
+    #   model: claude-opus-5
+    #   max_turns: 60
+    #   skip_build: false   # true for a repo with nothing to build
