@@ -51,6 +51,7 @@ exception). It cannot relax security, data, build or impact rules.
 | Skip the review on one PR | Add the label `no-review` before pushing. |
 | Save minutes while still working | Keep the PR a draft; drafts are not reviewed. |
 | Re-run a review | Push a commit, or re-run the workflow from the Actions tab. |
+| No run after a push | The PR's diff against the base is empty or only touches ignored paths (`**.md`, `docs/**`); GitHub then skips the workflow. |
 | Read why the build went red | Open the run → artifact `build-results` → the project's `*.log`. |
 | Change a rule | PR to `REVIEW-STANDARDS.md`. |
 | Swap the model | `with: model:` in the caller (see `caller-template.yml`). |
