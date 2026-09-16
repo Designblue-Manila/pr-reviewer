@@ -199,6 +199,10 @@ ensure_mysql() {
 
 mysql_exec() { mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -e "$1" >/dev/null 2>&1; }
 
+# Failures that mean "the runner could not provide something", not "the code is wrong".
+# They downgrade a suite that produced NO result at all; they never mask a suite that ran.
+PHP_ENV_ERRORS='SQLSTATE\[HY000\] \[2002\]|could not find driver|Connection refused|Access denied for user|Unknown database|Unable to read key from file|No application encryption key'
+
 # active (uncommented) <env name="X" value="Y"/> from phpunit.xml
 phpunit_env() { [ -f phpunit.xml ] && grep -v '<!--' phpunit.xml | grep -oE "name=\"$1\" value=\"[^\"]*\"" | sed 's/.*value="//; s/"$//' | head -1; }
 
@@ -279,7 +283,7 @@ build_node() {
 }
 
 build_php() {
-  local dir="$1" out="$2" phpv line install boot migrate tests db lint dbname
+  local dir="$1" out="$2" phpv line install boot migrate tests db lint dbname env_errors
   phpv="$(php -r 'echo PHP_VERSION;' 2>/dev/null || echo none)"
   ( cd "$dir" || exit 1
     install=ok boot=none migrate=none tests=none db=none lint=ok
@@ -331,8 +335,13 @@ build_php() {
       run_timed composer install --no-interaction --prefer-dist --no-progress --ignore-platform-req=php >>"$out/install.log" 2>&1 && install=ok
     fi
     if [ "$install" = ok ]; then
-      grep -qE '^APP_KEY=.+' .env || php artisan key:generate --force >>"$out/install.log" 2>&1 || true
-      [ -f .env.testing ] && ! grep -qE '^APP_KEY=.+' .env.testing && set_env_kv .env.testing APP_KEY "$(grep -E '^APP_KEY=' .env | cut -d= -f2-)"
+      # `APP_KEY=` followed by spaces and a trailing `# comment` is an EMPTY key, but
+      # `.+` matches that whitespace and the check passes — which is how parola-api ran
+      # its whole suite with no app key. Require a real, non-comment first character.
+      has_app_key() { grep -qE '^APP_KEY=[[:space:]]*[^[:space:]#]' "$1" 2>/dev/null; }
+      has_app_key .env || php artisan key:generate --force >>"$out/install.log" 2>&1 || true
+      [ -f .env.testing ] && ! has_app_key .env.testing &&
+        set_env_kv .env.testing APP_KEY "$(grep -E '^APP_KEY=' .env | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '[:space:]')"
       # Passport needs its RSA key pair on disk; a fresh checkout has none
       if grep -q '"laravel/passport"' composer.json && [ -f artisan ]; then
         php artisan passport:keys --force >>"$out/install.log" 2>&1 || true
@@ -356,23 +365,38 @@ build_php() {
         if [ -f artisan ]; then run_timed php artisan test --no-ansi >"$out/test.log" 2>&1 && tests=passed || tests=failed
         elif [ -x vendor/bin/phpunit ]; then run_timed vendor/bin/phpunit >"$out/test.log" 2>&1 && tests=passed || tests=failed
         fi
-        if [ "$tests" = failed ] && grep -qiE 'SQLSTATE\[HY000\] \[2002\]|could not find driver|Connection refused|Access denied for user|Unknown database|Unable to read key from file|No application encryption key' "$out/test.log"; then
-          tests=unrunnable
-        fi
-        if [ "$tests" = passed ] || [ "$tests" = failed ]; then
-          tl="$(sed -E 's/\x1b\[[0-9;]*m//g' "$out/test.log" | grep -E '^\s*Tests:' | tail -1)"
+        # A "Tests:" summary line means the suite RAN. That decides the verdict —
+        # never an error pattern found somewhere in the log. One environment-flavoured
+        # failure (a missing APP_KEY in an unrelated test, say) used to reclassify the
+        # whole run as `unrunnable`, which the reviewer is told to treat as a Nit — so a
+        # run with real failures alongside it was reported green and could be approved.
+        tl="$(sed -E 's/\x1b\[[0-9;]*m//g' "$out/test.log" | grep -E '^\s*Tests:' | tail -1)"
+        if [ -z "$tl" ]; then
+          # no summary at all: the suite never got far enough to run a single test
+          if [ "$tests" = failed ] && grep -qiE "$PHP_ENV_ERRORS" "$out/test.log"; then
+            tests=unrunnable
+          fi
+        else
           np="$(printf '%s' "$tl" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')"
           nf="$(printf '%s' "$tl" | grep -oE '[0-9]+ (failed|errors?)' | grep -oE '[0-9]+' | paste -sd+ - | bc 2>/dev/null)"
-          [ "$tests" = passed ] && [ -n "$np" ] && tests="passed:$np"
+          [ "$tests" = passed ] && tests="passed:${np:-0}"
           [ "$tests" = failed ] && tests="failed:${nf:-?}/${np:-0}"
+          # the reviewer still needs to know some of those failures look environmental,
+          # so it can name which — but the run stays failed, and stays red.
+          if [ "$tests" != "${tests#failed}" ]; then
+            env_errors="$(grep -ciE "$PHP_ENV_ERRORS" "$out/test.log" || true)"
+          fi
         fi
       fi
     fi
-    { echo "install=$install"; echo "boot=$boot"; echo "migrate=$migrate"; echo "tests=$tests"; echo "db=$db"; echo "lint=$lint"; } > "$out/status.txt"
+    { echo "install=$install"; echo "boot=$boot"; echo "migrate=$migrate"; echo "tests=$tests"; echo "db=$db"; echo "lint=$lint"; echo "env_errors=${env_errors:-0}"; } > "$out/status.txt"
   )
   install="$(status_of "$out" install)"; lint="$(status_of "$out" lint)"; boot="$(status_of "$out" boot)"
   migrate="$(status_of "$out" migrate)"; tests="$(status_of "$out" tests)"; db="$(status_of "$out" db)"
+  env_errors="$(status_of "$out" env_errors)"
   line="project=$dir toolchain=php php=$phpv install=${install:-fail} lint=${lint:-ok} boot=${boot:-none} migrate=${migrate:-none} tests=${tests:-none} db=${db:-none}"
+  # the count is a hint for the reviewer, not a downgrade: the run is still failed and still red
+  [ "${env_errors:-0}" != 0 ] && line="$line env_errors=$env_errors"
   record "$line"
   [ "${install:-fail}" = fail ] && red "$dir: composer install failed"
   [ "${lint:-ok}" = fail ] && red "$dir: PHP syntax error"
