@@ -327,9 +327,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
+      # MUST stay within what the OLDEST caller still in the field grants, or GitHub
+      # refuses to start the whole run — build and review included, on every repo that
+      # has not taken the new caller yet. `pull-requests: write` already covers posting
+      # a comment and a review on a PR; `issues: write` is not needed and asking for it
+      # took the reviewer down on 23 repos.
       contents: read
       pull-requests: write
-      issues: write
+      issues: read
       id-token: write
     steps:
       - name: Decide whether there is anything to answer
