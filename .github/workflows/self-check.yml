@@ -1,0 +1,62 @@
+# Guards this repo against itself.
+#
+# review.yml is consumed by every repo we work in, and it goes live on all of them
+# the moment it merges — there is no staging and no per-repo rollout. So the things
+# that can take the whole fleet down are checked here, on every PR, before merge.
+#
+# It exists because one of them did: a job asking for `issues: write` when callers
+# grant `issues: read` stopped GitHub starting the workflow at all, on 23 repos.
+
+name: Self check
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/review.yml'
+      - '.github/workflows/self-check.yml'
+      - 'caller-template.yml'
+      - 'scripts/**'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  self-check:
+    name: self check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Caller contract — no job may out-ask the callers in the field
+        run: python3 scripts/check-caller-contract.py
+
+      - name: Workflows are valid
+        run: |
+          curl -sSL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint .github/workflows/review.yml .github/workflows/self-check.yml
+          # the caller template is a workflow too, but only once it is in the right place
+          mkdir -p /tmp/caller/.github/workflows
+          cp caller-template.yml /tmp/caller/.github/workflows/pr-review.yml
+          ./actionlint /tmp/caller/.github/workflows/pr-review.yml
+
+      - name: build.sh parses
+        run: bash -n scripts/build.sh
+
+      - name: build.sh detects a Laravel project correctly
+        # the PHP-from-lockfile fix had no test; this is the cheapest one that would
+        # have caught it — a lockfile needing 8.4 behind a composer.json saying ^8.3
+        run: |
+          mkdir -p /tmp/fixture && cd /tmp/fixture
+          printf '{"require":{"php":"^8.3"}}' > composer.json
+          printf '{"packages":[{"name":"symfony/clock","require":{"php":">=8.4.1"}}]}' > composer.lock
+          out="$(bash "$GITHUB_WORKSPACE/scripts/build.sh" detect)"
+          echo "$out"
+          echo "$out" | grep -qx 'php_version=8.4' || {
+            echo "::error::expected php_version=8.4 from the lockfile, got:"; echo "$out"; exit 1; }

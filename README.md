@@ -36,6 +36,12 @@ Designblue-Manila/pr-reviewer/.github/workflows/review.yml
   does not reach a workflow owned by a different account.
 - **What is checked** is written in [REVIEW-STANDARDS.md](REVIEW-STANDARDS.md). That
   file is the rulebook; change it by PR here and every repo follows on its next review.
+- **Releases.** Callers pin to the `v1` tag, not `main` — merging here changes nothing
+  in the field until the tag moves, and rolling back is moving it back. The process,
+  and why it exists, is in [RELEASING.md](RELEASING.md).
+- **Self check.** Every PR here runs `scripts/check-caller-contract.py`, which fails if
+  any job in `review.yml` asks for a permission the callers in the field do not grant.
+  That mistake does not degrade the reviewer, it stops it starting at all, fleet-wide.
 
 ## Add a repository
 
