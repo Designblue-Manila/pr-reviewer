@@ -193,13 +193,26 @@ build_node() {
   pm="$(detect_pm "$dir")"; nodev="$(node --version 2>/dev/null || echo none)"
   ( cd "$dir" || exit 1
 
-    # package manager
-    if [ -n "$(json_get package.json packageManager)" ] && command -v corepack >/dev/null 2>&1; then
-      corepack enable >/dev/null 2>&1 || true
-    fi
+    # package manager — installed with npm, not corepack: the corepack bundled with older
+    # Node releases carries stale registry signing keys and fails with "Cannot find matching keyid".
+    pm_spec="$(json_get package.json packageManager)"          # e.g. pnpm@9.12.2+sha512…
+    pm_ver="$(printf '%s' "$pm_spec" | sed -E 's/^[^@]*@//; s/\+.*$//')"
     case "$pm" in
-      pnpm) command -v pnpm >/dev/null 2>&1 || npm i -g pnpm >/dev/null 2>&1 ;;
-      yarn) command -v yarn >/dev/null 2>&1 || npm i -g yarn >/dev/null 2>&1 ;;
+      pnpm)
+        if [ -z "$pm_ver" ]; then
+          # match the lockfile generation so install behaviour is the one the repo expects
+          case "$(grep -m1 -oE "lockfileVersion: '?[0-9]+" pnpm-lock.yaml 2>/dev/null | grep -oE '[0-9]+$')" in
+            9) pm_ver=9 ;; 6) pm_ver=8 ;; 5) pm_ver=7 ;; *) pm_ver=latest ;;
+          esac
+        fi
+        npm i -g "pnpm@$pm_ver" >"$out/pm-install.log" 2>&1 || npm i -g pnpm >>"$out/pm-install.log" 2>&1
+        # pnpm 10+ refuses dependency build scripts (esbuild, sharp…) unless allowed; CI needs them
+        export npm_config_dangerously_allow_all_builds=true npm_config_strict_dep_builds=false CI=true ;;
+      yarn)
+        if [ -n "$pm_ver" ] && command -v corepack >/dev/null 2>&1; then
+          npm i -g corepack@latest >"$out/pm-install.log" 2>&1; corepack enable >>"$out/pm-install.log" 2>&1 || true
+        fi
+        command -v yarn >/dev/null 2>&1 || npm i -g yarn >>"$out/pm-install.log" 2>&1 ;;
     esac
 
     [ -f .env ] || { [ -f .env.example ] && cp .env.example .env; }
@@ -292,6 +305,10 @@ build_php() {
     if [ "$install" = ok ]; then
       grep -qE '^APP_KEY=.+' .env || php artisan key:generate --force >>"$out/install.log" 2>&1 || true
       [ -f .env.testing ] && ! grep -qE '^APP_KEY=.+' .env.testing && set_env_kv .env.testing APP_KEY "$(grep -E '^APP_KEY=' .env | cut -d= -f2-)"
+      # Passport needs its RSA key pair on disk; a fresh checkout has none
+      if grep -q '"laravel/passport"' composer.json && [ -f artisan ]; then
+        php artisan passport:keys --force >>"$out/install.log" 2>&1 || true
+      fi
 
       # boot check: the app must construct, register providers and load routes
       if [ -f artisan ]; then
@@ -311,7 +328,7 @@ build_php() {
         if [ -f artisan ]; then run_timed php artisan test >"$out/test.log" 2>&1 && tests=passed || tests=failed
         elif [ -x vendor/bin/phpunit ]; then run_timed vendor/bin/phpunit >"$out/test.log" 2>&1 && tests=passed || tests=failed
         fi
-        if [ "$tests" = failed ] && grep -qiE 'SQLSTATE\[HY000\] \[2002\]|could not find driver|Connection refused|Access denied for user|Unknown database' "$out/test.log"; then
+        if [ "$tests" = failed ] && grep -qiE 'SQLSTATE\[HY000\] \[2002\]|could not find driver|Connection refused|Access denied for user|Unknown database|Unable to read key from file|No application encryption key' "$out/test.log"; then
           tests=unrunnable
         fi
         if [ "$tests" = passed ] || [ "$tests" = failed ]; then
