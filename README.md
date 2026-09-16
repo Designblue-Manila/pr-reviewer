@@ -3,22 +3,30 @@
 One shared, automated pull-request reviewer for every repository we work in. It builds
 and tests each PR, reads everything that depends on the change, posts line-pinned
 findings, and gives one verdict: **approved** (safe to merge — the author merges) or
-**changes requested** (fix, push, it re-reviews).
+**changes requested** (fix, push, it re-reviews). Argue with a finding in a PR comment
+and it answers: it re-checks its own claim and says whether it stands or is withdrawn.
 
 It never merges, never pushes, never edits code.
 
 ## How it works
 
 ```
-repo/.github/workflows/pr-review.yml   (15 lines, from caller-template.yml)
-        │  on: pull_request
+repo/.github/workflows/pr-review.yml   (from caller-template.yml)
+        │  on: pull_request          → build + review
+        │  on: issue_comment,        → respond
+        │      pull_request_review_comment
         ▼
 Designblue-Manila/pr-reviewer/.github/workflows/review.yml
-        ├─ job build   scripts/build.sh — install, build, boot, migrate, test. No AI.
-        │              Red check when something fails; logs kept as an artifact.
-        └─ job review  Claude (Opus) reads the diff, the build logs, REVIEW-STANDARDS.md
-                       and the repo's own .github/REVIEW-NOTES.md, traces the impact
-                       radius, comments inline, then approves or requests changes.
+        ├─ job build    scripts/build.sh — install, build, boot, migrate, test. No AI.
+        │               Red check when something fails; logs kept as an artifact.
+        ├─ job review   Claude (Opus) reads the diff, the build logs, REVIEW-STANDARDS.md
+        │               and the repo's own .github/REVIEW-NOTES.md, traces the impact
+        │               radius, comments inline, then approves or requests changes.
+        └─ job respond  someone answered back. Claude re-checks its own standing findings
+                        against the code and posts one comment: per finding, stands /
+                        withdrawn / needs a human. No build, no fresh review. Runs only
+                        while the reviewer is blocking the PR, only for comments by
+                        people, and never on a fork PR.
 ```
 
 - **Identity.** The review is posted by the Claude GitHub App (`claude`), which must be
