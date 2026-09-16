@@ -69,6 +69,20 @@ PY
 # first "major" or "major.minor" number in a semver range string
 first_version() { printf '%s' "$1" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1; }
 
+# highest PHP minimum any locked package requires ("^7.4 || ^8.0" counts as 7.4); prints "8.4" or nothing
+# (kept as a variable, not a heredoc inside $(...), because bash 3.2 mis-parses that)
+read -r -d '' PHP_LOCK_MIN_PY <<'PY' || true
+import json,re,sys
+try: lock=json.load(open(sys.argv[1]))
+except Exception: sys.exit(0)
+best=(0,0)
+for p in lock.get("packages",[]):
+    c=(p.get("require") or {}).get("php","")
+    mins=[(int(m.group(1)),int(m.group(2))) for m in re.finditer(r'(\d+)\.(\d+)', c)]
+    if mins and min(mins)>best: best=min(mins)
+if best[0]: print("%d.%d"%best)
+PY
+
 # --------------------------------------------------------- project discovery ---
 
 # Emits "<dir>\t<kind>" lines. kind = php | node | wp
@@ -101,9 +115,18 @@ detect_node_version() {
 }
 
 detect_php_version() {
-  local dir="$1" v
+  local dir="$1" v lockmin
   v="$(first_version "$(json_get "$dir/composer.json" require.php)")"
   case "$v" in ''|8) v="$PHP_DEFAULT" ;; esac
+  # composer.json can allow an older PHP than the locked packages actually need
+  # (e.g. "^8.3" with symfony/clock requiring >=8.4.1); take the highest lock-file minimum
+  if [ -f "$dir/composer.lock" ]; then
+    lockmin="$(python3 -c "$PHP_LOCK_MIN_PY" "$dir/composer.lock" 2>/dev/null)"
+    if [ -n "$lockmin" ]; then
+      # only move forward within the same major the project declares
+      if [ "${lockmin%%.*}" = "${v%%.*}" ] && [ "$(printf '%s\n%s\n' "$v" "$lockmin" | sort -V | tail -1)" = "$lockmin" ]; then v="$lockmin"; fi
+    fi
+  fi
   printf '%s' "$v"
 }
 
