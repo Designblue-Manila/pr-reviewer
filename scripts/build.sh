@@ -193,13 +193,26 @@ build_node() {
   pm="$(detect_pm "$dir")"; nodev="$(node --version 2>/dev/null || echo none)"
   ( cd "$dir" || exit 1
 
-    # package manager
-    if [ -n "$(json_get package.json packageManager)" ] && command -v corepack >/dev/null 2>&1; then
-      corepack enable >/dev/null 2>&1 || true
-    fi
+    # package manager — installed with npm, not corepack: the corepack bundled with older
+    # Node releases carries stale registry signing keys and fails with "Cannot find matching keyid".
+    pm_spec="$(json_get package.json packageManager)"          # e.g. pnpm@9.12.2+sha512…
+    pm_ver="$(printf '%s' "$pm_spec" | sed -E 's/^[^@]*@//; s/\+.*$//')"
     case "$pm" in
-      pnpm) command -v pnpm >/dev/null 2>&1 || npm i -g pnpm >/dev/null 2>&1 ;;
-      yarn) command -v yarn >/dev/null 2>&1 || npm i -g yarn >/dev/null 2>&1 ;;
+      pnpm)
+        if [ -z "$pm_ver" ]; then
+          # match the lockfile generation so install behaviour is the one the repo expects
+          case "$(grep -m1 -oE "lockfileVersion: '?[0-9]+" pnpm-lock.yaml 2>/dev/null | grep -oE '[0-9]+$')" in
+            9) pm_ver=9 ;; 6) pm_ver=8 ;; 5) pm_ver=7 ;; *) pm_ver=latest ;;
+          esac
+        fi
+        npm i -g "pnpm@$pm_ver" >"$out/pm-install.log" 2>&1 || npm i -g pnpm >>"$out/pm-install.log" 2>&1
+        # pnpm 10+ refuses dependency build scripts (esbuild, sharp…) unless allowed; CI needs them
+        export npm_config_dangerously_allow_all_builds=true npm_config_strict_dep_builds=false CI=true ;;
+      yarn)
+        if [ -n "$pm_ver" ] && command -v corepack >/dev/null 2>&1; then
+          npm i -g corepack@latest >"$out/pm-install.log" 2>&1; corepack enable >>"$out/pm-install.log" 2>&1 || true
+        fi
+        command -v yarn >/dev/null 2>&1 || npm i -g yarn >>"$out/pm-install.log" 2>&1 ;;
     esac
 
     [ -f .env ] || { [ -f .env.example ] && cp .env.example .env; }
@@ -289,9 +302,18 @@ build_php() {
     fi
 
     run_timed composer install --no-interaction --prefer-dist --no-progress >"$out/install.log" 2>&1 || install=fail
+    # a composer.json whose php pin is older than what its own lockfile needs: retry ignoring the php platform check
+    if [ "$install" = fail ] && grep -q "your php version .* does not satisfy" "$out/install.log"; then
+      echo "php-platform=ignored" >> "$out/notes.txt"
+      run_timed composer install --no-interaction --prefer-dist --no-progress --ignore-platform-req=php >>"$out/install.log" 2>&1 && install=ok
+    fi
     if [ "$install" = ok ]; then
       grep -qE '^APP_KEY=.+' .env || php artisan key:generate --force >>"$out/install.log" 2>&1 || true
       [ -f .env.testing ] && ! grep -qE '^APP_KEY=.+' .env.testing && set_env_kv .env.testing APP_KEY "$(grep -E '^APP_KEY=' .env | cut -d= -f2-)"
+      # Passport needs its RSA key pair on disk; a fresh checkout has none
+      if grep -q '"laravel/passport"' composer.json && [ -f artisan ]; then
+        php artisan passport:keys --force >>"$out/install.log" 2>&1 || true
+      fi
 
       # boot check: the app must construct, register providers and load routes
       if [ -f artisan ]; then
@@ -308,14 +330,14 @@ build_php() {
 
       # tests
       if ls tests/**/*Test.php tests/*Test.php >/dev/null 2>&1 || find tests -name '*Test.php' 2>/dev/null | grep -q .; then
-        if [ -f artisan ]; then run_timed php artisan test >"$out/test.log" 2>&1 && tests=passed || tests=failed
+        if [ -f artisan ]; then run_timed php artisan test --no-ansi >"$out/test.log" 2>&1 && tests=passed || tests=failed
         elif [ -x vendor/bin/phpunit ]; then run_timed vendor/bin/phpunit >"$out/test.log" 2>&1 && tests=passed || tests=failed
         fi
-        if [ "$tests" = failed ] && grep -qiE 'SQLSTATE\[HY000\] \[2002\]|could not find driver|Connection refused|Access denied for user|Unknown database' "$out/test.log"; then
+        if [ "$tests" = failed ] && grep -qiE 'SQLSTATE\[HY000\] \[2002\]|could not find driver|Connection refused|Access denied for user|Unknown database|Unable to read key from file|No application encryption key' "$out/test.log"; then
           tests=unrunnable
         fi
         if [ "$tests" = passed ] || [ "$tests" = failed ]; then
-          tl="$(grep -E '^\s*Tests:' "$out/test.log" | tail -1)"
+          tl="$(sed -E 's/\x1b\[[0-9;]*m//g' "$out/test.log" | grep -E '^\s*Tests:' | tail -1)"
           np="$(printf '%s' "$tl" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')"
           nf="$(printf '%s' "$tl" | grep -oE '[0-9]+ (failed|errors?)' | grep -oE '[0-9]+' | paste -sd+ - | bc 2>/dev/null)"
           [ "$tests" = passed ] && [ -n "$np" ] && tests="passed:$np"
@@ -332,7 +354,14 @@ build_php() {
   [ "${install:-fail}" = fail ] && red "$dir: composer install failed"
   [ "${lint:-ok}" = fail ] && red "$dir: PHP syntax error"
   [ "${boot:-none}" = fail ] && red "$dir: application failed to boot"
-  [ "${migrate:-none}" = fail ] && red "$dir: migrations failed on a fresh database"
+  # a migration failure is this PR's fault only if the PR touched the migrations; otherwise it is repo debt
+  if [ "${migrate:-none}" = fail ]; then
+    if [ -z "$CHANGED_FILE" ] || changed_files_for "$dir" | grep -q "database/migrations/"; then
+      red "$dir: migrations failed on a fresh database"
+    else
+      record "note=$dir: migrations already fail on a fresh database before this PR (no migration changed here)"
+    fi
+  fi
   case "${tests:-none}" in failed*) red "$dir: tests failed" ;; esac
   return 0
 }

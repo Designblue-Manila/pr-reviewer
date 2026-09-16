@@ -65,8 +65,10 @@ Formatting and style are never findings. A linter's job is not the reviewer's.
 
 ### Build
 - Install, build, boot, migrate or tests failing in the build job for a reason in the
-  code. A failure caused by the CI environment itself (missing env var or service,
-  runtime the runner lacks) is a Nit that says exactly that.
+  code **this PR changes**. A failure caused by the CI environment itself (missing env
+  var or service, runtime the runner lacks) is a Nit that says exactly that. A failure
+  that already exists on the base branch and is unrelated to the PR's files is repo
+  debt: a Nit that names it, never a block.
 
 ## Conventions (Nits unless stated)
 
