@@ -352,7 +352,12 @@ cmd_run() {
   rm -rf "$RESULTS_DIR"; mkdir -p "$RESULTS_DIR"
   local found=0 dir kind out
 
-  if [ -n "${BASE_SHA:-}" ]; then
+  # Changed files: the workflow supplies a list (CHANGED_FILES_FILE, from the PR API);
+  # locally, BASE_SHA works when the base commit is reachable.
+  if [ -n "${CHANGED_FILES_FILE:-}" ] && [ -s "$CHANGED_FILES_FILE" ]; then
+    CHANGED_FILE="$RESULTS_DIR/changed-files.txt"
+    cp "$CHANGED_FILES_FILE" "$CHANGED_FILE"
+  elif [ -n "${BASE_SHA:-}" ]; then
     git fetch -q --depth=1 origin "$BASE_SHA" 2>/dev/null || true
     if git cat-file -e "$BASE_SHA" 2>/dev/null; then
       CHANGED_FILE="$RESULTS_DIR/changed-files.txt"

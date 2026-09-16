@@ -104,11 +104,19 @@ jobs:
         # build.sh starts mysql:8.4 in Docker instead.
         run: sudo systemctl start mysql 2>/dev/null || true
 
+      - name: List the PR's changed files
+        # the checkout has no credentials (on purpose), so ask the API instead of git
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files"
+          --paginate --jq '.[].filename' > "$RUNNER_TEMP/changed-files.txt" || : > "$RUNNER_TEMP/changed-files.txt"
+
       - name: Install, build, migrate, test
         id: run
         continue-on-error: true
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CHANGED_FILES_FILE: ${{ runner.temp }}/changed-files.txt
           MYSQL_PASSWORD: root
         run: bash .pr-reviewer/scripts/build.sh run
 
