@@ -131,6 +131,7 @@ jobs:
         with:
           name: build-results
           path: .build-results
+          include-hidden-files: true   # the folder starts with a dot; excluded by default
           retention-days: 7
           if-no-files-found: warn
 

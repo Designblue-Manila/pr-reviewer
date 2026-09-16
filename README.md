@@ -24,7 +24,8 @@ Designblue-Manila/pr-reviewer/.github/workflows/review.yml
 - **Identity.** The review is posted by the Claude GitHub App (`claude`), which must be
   installed on the organisation or account that owns the repo.
 - **Login.** Each repo carries a `CLAUDE_CODE_OAUTH_TOKEN` secret (a Claude subscription
-  token from `claude setup-token`). The workflow reads it via `secrets: inherit`.
+  token from `claude setup-token`). The caller passes it explicitly; `secrets: inherit`
+  does not reach a workflow owned by a different account.
 - **What is checked** is written in [REVIEW-STANDARDS.md](REVIEW-STANDARDS.md). That
   file is the rulebook; change it by PR here and every repo follows on its next review.
 
