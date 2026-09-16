@@ -241,6 +241,10 @@ jobs:
                  says exactly that. Never call a CI-environment failure a code defect.
                - `build=skipped` or toolchain `none` → say "nothing to build; reviewed by reading".
                - `lockfile=out-of-sync` or `lockfile=missing` → a Nit.
+               - Pre-existing failures: if a failing test, migration or install problem is
+                 unrelated to the files this PR changes and would fail on the base branch
+                 too (a `note=` line in the summary says so for migrations), it is repo
+                 debt, not this PR's fault. Report it as a Nit that names it; do not block.
 
             3. Impact radius. For EVERY changed export, function, component, composable,
                store, model, controller, route, middleware, migration, config key, env key
