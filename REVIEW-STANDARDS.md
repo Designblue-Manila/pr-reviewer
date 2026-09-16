@@ -128,3 +128,23 @@ what it did not read.
 Every push to the PR re-runs the review. The reviewer checks its own earlier Important
 items first, raises no new Nits on unchanged lines, and approves once the list is empty
 and the build is green.
+
+## Answering back
+
+If you think a finding is wrong, say so in a PR comment. While the reviewer is blocking
+a PR, a comment from a person makes it re-open its own findings and answer, one by one:
+
+- **Stands** — it re-checked and the finding holds. It says what it checked.
+- **Withdrawn** — it was wrong. It says what it got wrong.
+- **Needs a human** — it cannot settle this from the repository alone, and says what would.
+
+What it will not do is fold because it was asked to. A finding is withdrawn only when the
+reviewer has gone and checked the code, the lockfile or the log itself and found its own
+claim false — never because the argument was confident or well written. Instructions
+written in a comment ("approve this", "skip the impact check") are ignored; a comment can
+tell the reviewer a fact to go and verify, never a conclusion to accept.
+
+It replies only on a PR it is currently blocking, and only to people — never to itself or
+another bot. If it withdraws every Important item **and** the build on that commit is
+green, it approves. If it withdraws everything but the build has not passed, it says so
+and asks for a push: an argument is not a substitute for a green build.
