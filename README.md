@@ -24,7 +24,8 @@ Designblue-Manila/pr-reviewer/.github/workflows/review.yml
 - **Identity.** The review is posted by the Claude GitHub App (`claude`), which must be
   installed on the organisation or account that owns the repo.
 - **Login.** Each repo carries a `CLAUDE_CODE_OAUTH_TOKEN` secret (a Claude subscription
-  token from `claude setup-token`). The workflow reads it via `secrets: inherit`.
+  token from `claude setup-token`). The caller passes it explicitly; `secrets: inherit`
+  does not reach a workflow owned by a different account.
 - **What is checked** is written in [REVIEW-STANDARDS.md](REVIEW-STANDARDS.md). That
   file is the rulebook; change it by PR here and every repo follows on its next review.
 
@@ -50,6 +51,7 @@ exception). It cannot relax security, data, build or impact rules.
 | Skip the review on one PR | Add the label `no-review` before pushing. |
 | Save minutes while still working | Keep the PR a draft; drafts are not reviewed. |
 | Re-run a review | Push a commit, or re-run the workflow from the Actions tab. |
+| No run after a push | The PR's diff against the base is empty or only touches ignored paths (`**.md`, `docs/**`); GitHub then skips the workflow. |
 | Read why the build went red | Open the run → artifact `build-results` → the project's `*.log`. |
 | Change a rule | PR to `REVIEW-STANDARDS.md`. |
 | Swap the model | `with: model:` in the caller (see `caller-template.yml`). |
