@@ -282,9 +282,13 @@ jobs:
             4. Cross-repo impact. If the PR changes an API route, response shape, field
                name, validation rule or auth requirement, name the sibling repositories by
                convention (same project prefix with -web, -site, -website, -cms, -portal,
-               -api). The PR body must then either link the consumer PR or state that no
-               consumer change is needed. Neither present → Important. State the merge
-               order (API first, or consumer first).
+               -api) and state the merge order (API first, or consumer first).
+               Whether the body links a consumer PR is a **Nit**, never an Important: you
+               cannot see the sibling repository, so a missing link is missing evidence, not
+               a proven break. Say which consumer you would want confirmed and move on.
+               It becomes Important only when the change breaks a consumer you can actually
+               see — a call site in THIS repository — or when the body claims a consumer is
+               handled and the diff shows it is not.
 
             5. House rules from REVIEW-STANDARDS.md, security first.
 
