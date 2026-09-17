@@ -35,6 +35,14 @@ merges; the reviewer never does.
 
 Formatting and style are never findings. A linter's job is not the reviewer's.
 
+**The pull request body is never a finding on its own.** No template is required, no
+section headings, no checklist, no minimum length. A thin or empty body earns at most one
+Nit naming the single thing that would have saved you a guess — never an Important, never
+a request to rewrite it, never a second mention on a later round. Judge the code; the body
+is context, not a deliverable. The one exception is a body that makes a claim about the
+code which turns out to be false — that is Important, because the claim is wrong, not
+because the body is short.
+
 ## Hard rules (always Important)
 
 ### Security
@@ -104,6 +112,8 @@ A repo may waive a design floor in its `.github/REVIEW-NOTES.md` (see below).
 - Formatting, import order, quote style, trailing commas, whitespace.
 - Missing tests in a repository that has no test suite at all. Say "no tests" in the
   summary; do not ask the author to start one in this PR.
+- An empty, short or unstructured PR body, a missing template, a title that does not
+  follow conventional commits.
 
 ## Repo-specific notes: `.github/REVIEW-NOTES.md`
 
