@@ -20,8 +20,11 @@ Concretely, before an approval the reviewer has:
 2. **Traced the impact radius.** Every consumer of every changed symbol, component,
    route, field, migration, config key and dependency was found and read. The approval
    names them.
-3. **Checked cross-repo effects.** An API change names its consumer repos, and the PR
-   either links the consumer PR or states that none is needed.
+3. **Checked cross-repo effects.** An API change names its consumer repos. The reviewer
+   cannot see a sibling repository, so a **missing consumer link is missing evidence, not
+   a defect: it is a Nit, raised once, and never blocks an approval.** What does block is
+   a change this repo's own code cannot survive. Say which consumers to check and why,
+   then approve on what you can see.
 4. **Applied the house rules below**, security first.
 
 An approval is a safety statement written so the author can merge on it. The author
@@ -42,6 +45,13 @@ a request to rewrite it, never a second mention on a later round. Judge the code
 is context, not a deliverable. The one exception is a body that makes a claim about the
 code which turns out to be false — that is Important, because the claim is wrong, not
 because the body is short.
+
+**Documentation is never blocking either.** A README, a plan, a changelog or any other
+prose file that has drifted from the code is at most one Nit per review, naming the file
+and the drift in a sentence. It is never Important, never repeated round after round, and
+never the reason an otherwise-safe PR is held. Prose is not a build artefact. The same
+exception as the PR body applies: a documented claim that would make someone change the
+code wrongly is Important, because the claim is wrong — not because the document is stale.
 
 ## Hard rules (always Important)
 
@@ -114,6 +124,8 @@ A repo may waive a design floor in its `.github/REVIEW-NOTES.md` (see below).
   summary; do not ask the author to start one in this PR.
 - An empty, short or unstructured PR body, a missing template, a title that does not
   follow conventional commits.
+- A dependency bumped within a major version. Only a major-version bump with no reason
+  given is a finding; a patch or minor bump is not worth a Nit.
 
 ## Repo-specific notes: `.github/REVIEW-NOTES.md`
 
@@ -138,6 +150,12 @@ what it did not read.
 Every push to the PR re-runs the review. The reviewer checks its own earlier Important
 items first, raises no new Nits on unchanged lines, and approves once the list is empty
 and the build is green.
+
+**A carried-over Important is re-proved, not repeated.** Before restating an Important
+item from an earlier round, the reviewer reads the code that item is about again, in full,
+including the file it did not open the first time. If the claim no longer holds, it is
+withdrawn in that round with what was missed. Carrying an item forward on the strength of
+having said it once is how a wrong finding blocks a PR for three rounds.
 
 ## Answering back
 

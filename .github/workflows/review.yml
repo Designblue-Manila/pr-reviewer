@@ -359,8 +359,19 @@ jobs:
         run: |
           set -euo pipefail
           # One API read; everything below is decided from it.
-          gh pr view "$PR" --json state,isDraft,headRefOid,baseRefName,reviews,statusCheckRollup,headRepositoryOwner,headRepository \
-            > "$RUNNER_TEMP/pr.json"
+          #
+          # `statusCheckRollup` needs `checks: read`, which the caller does NOT grant and
+          # cannot be added here without breaking every repo still on an older caller
+          # (see the permissions note above). GitHub then fails the WHOLE query, not just
+          # that field, and `set -e` killed the job — which is how two developers were
+          # left without an answer on 16-17 Sep. So: ask for it, and fall back to the same
+          # query without it.
+          if ! gh pr view "$PR" --json state,isDraft,headRefOid,baseRefName,reviews,statusCheckRollup,headRepositoryOwner,headRepository \
+                 > "$RUNNER_TEMP/pr.json" 2>"$RUNNER_TEMP/pr.err"; then
+            echo "::notice::Could not read status checks ($(tr -d '\n' < "$RUNNER_TEMP/pr.err")); continuing without them."
+            gh pr view "$PR" --json state,isDraft,headRefOid,baseRefName,reviews,headRepositoryOwner,headRepository \
+              > "$RUNNER_TEMP/pr.json"
+          fi
 
           state=$(jq -r .state       "$RUNNER_TEMP/pr.json")
           draft=$(jq -r .isDraft     "$RUNNER_TEMP/pr.json")
@@ -552,7 +563,12 @@ jobs:
                  `success`: do NOT approve. Post the comment, say the findings are
                  withdrawn but the build has not passed on this commit, and ask them to
                  push (an empty commit is enough) so the build and the review run clean.
-                 An argument never substitutes for a green build.
+                 An argument never substitutes for a green build. `unknown` means this job
+                 could not read the checks, not that they failed — say exactly that, so
+                 nobody reads it as a red build.
+
+            Whatever you decide, POST SOMETHING. A person asked a question and is waiting;
+            silence is the one outcome that is always wrong.
 
             Keep it short and concrete. File paths, line numbers, one or two sentences per
             item. No praise, no restating their comment back at them, no apology theatre —
