@@ -319,24 +319,36 @@ jobs:
                  `gh pr review ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --approve --body "…"`
                  ONLY when: build ok (or nothing to build), tests passed or none, impact
                  radius traced with no Important finding, cross-repo handled, and no
-                 secret, key material or .env file was added. The body must begin:
+                 secret, key material or .env file was added. The body is the line
                  "🤖 **Automated review — safe to merge. You can merge this to `${{ github.event.pull_request.base.ref }}` now.**"
-                 followed by one line each: Build, Tests (with the count), Impact radius
-                 (what changed, what uses it, verdict), Cross-repo, Nits (count or "none").
+                 and then AT MOST TWO short lines, only for what the author cannot see
+                 for themselves — a real risk they should watch, or a Nit worth having.
+                 A green build, a passing test count and an impact radius that came back
+                 clean are not worth a line each. Nothing to add is the common case:
+                 send the headline alone.
                - Otherwise REQUEST CHANGES with
                  `gh pr review ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --request-changes --body "…"`.
-                 Begin "🤖 **Automated review — changes requested.**", list every
-                 Important item as `file:line — what breaks — the fix`, add the same
-                 one-line-each summary, and end with
-                 "Push the fix and I will re-review automatically."
+                 Begin "🤖 **Automated review — changes requested.**", then one line per
+                 Important item as `file:line — what breaks — the fix`, then
+                 "Push the fix and I will re-review automatically." Nothing else — no
+                 summary block, no restating what the PR does.
                - Over about 2,000 changed lines: review the riskiest files first, list the
                  files you did not read, add a Nit asking to split the PR, and never
                  approve what you did not read.
                - Never approve a diff that adds a secret, a private key, a token or a .env
                  file, whatever else is true.
 
+            Approve by default. The bar is "does this break or degrade something that
+            works today" — nothing else. If you cannot name what breaks, in which file,
+            and how, it is not an Important finding. Uncertainty is a reason to approve
+            and say what you could not check, never a reason to request changes. Code
+            that is simply not how you would have written it is not a finding at any
+            severity. Do not ask for tests, docs, types or refactors the repo does not
+            already require.
+
             Keep review bodies short and concrete: file paths, line numbers, one sentence
-            per point. No praise, no restating the diff.
+            per point. No praise, no preamble, no restating the diff, no describing your
+            own process. If the reply is longer than the diff deserves, it is wrong.
 
       # A crashed reviewer and an approving reviewer look identical at merge time: the
       # author sees a check they have no reason to open. ib-e-shop-cms#9 merged with no
@@ -545,7 +557,14 @@ jobs:
                - an argument that is not about any standing finding of yours -> say so; do
                  not invent a finding to match it.
 
-            3. For EVERY Important item in your standing review, decide exactly one of
+            3. Adjudicate ONLY the item (or items) the person actually raised — not your
+               whole standing list. If they asked about one finding, go and check that
+               one finding and answer about it. Leave your other items exactly as they
+               are: do not re-argue them, do not re-state them, do not re-verify them,
+               and never raise something new you noticed while you were in there. A
+               developer who asks about one line gets an answer about that line.
+
+               For each item they DID raise, decide exactly one of
                (if you approved, you have none — go to step 5):
                - **STANDS** — say in one sentence what you re-checked and why it holds.
                - **WITHDRAWN** — say what you checked and what you got wrong. Be direct
@@ -569,12 +588,16 @@ jobs:
 
             5. Post exactly ONE comment with
                `gh pr comment <number> --repo ${{ github.repository }} --body "…"`.
-               Begin it "🤖 **Automated reply.**". Then one short block per Important item:
-               its `file:line`, the verdict from step 3, and one or two sentences. If you
-               approved and there are no items, just answer what they asked, in the same
-               shape: what you checked, `file:line`, what you found. End with the one
-               sentence that tells them what to do next — and when nothing needs doing,
-               say that plainly: the approval stands and they can merge.
+               Begin it "🤖 **Automated reply.**". Then ONE line per item they raised:
+               its `file:line`, the verdict from step 3, and one sentence. If you approved
+               and there are no items, answer what they asked in the same shape: what you
+               checked, `file:line`, what you found. End with one sentence on what to do
+               next — and when nothing needs doing, say so plainly: the approval stands,
+               they can merge.
+
+               Keep it short. No preamble, no recap of the PR, no list of your other
+               findings, no description of how you went about checking. Answer the
+               question and stop.
 
             6. Verdict handling — be careful here:
                - If your standing verdict is APPROVED: post the comment and leave the
