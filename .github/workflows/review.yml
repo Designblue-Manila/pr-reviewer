@@ -21,9 +21,15 @@ on:
         type: string
         default: claude-opus-5
       max_turns:
-        description: Upper bound on agent turns for one review
+        description: >-
+          Upper bound on agent turns for one review. 60 was not enough for a large PR:
+          ib-e-shop-cms#9 (107 files) burned the whole budget reading the diff and died
+          with "Reached maximum number of turns (60)", so a batched PR got NO review at
+          all while small ones sail through — the wrong way round. Measured rate is
+          ~7.5 turns/min, so 120 lands around 16 min and still fits the job's
+          timeout-minutes: 25. Raise the timeout too if you raise this much further.
         type: number
-        default: 60
+        default: 120
       skip_build:
         description: Skip the build job (repo with nothing to build)
         type: boolean
@@ -331,6 +337,34 @@ jobs:
 
             Keep review bodies short and concrete: file paths, line numbers, one sentence
             per point. No praise, no restating the diff.
+
+      # A crashed reviewer and an approving reviewer look identical at merge time: the
+      # author sees a check they have no reason to open. ib-e-shop-cms#9 merged with no
+      # review at all that way on 17 Sep 2026. We cannot block the merge — branch
+      # protection and rulesets are a paid feature these private repos do not have — so
+      # the next best thing is to make the silence impossible to miss. This posts into
+      # the PR thread, which notifies the author, instead of dying in the run log.
+      - name: Say so in the PR when the review could not finish
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TURNS: ${{ inputs.max_turns }}
+        run: |
+          set -euo pipefail
+          # Built with printf, not an indented heredoc: YAML block indentation would be
+          # carried into the body and GitHub would render the whole comment as code.
+          {
+            printf '🤖 **Automated review did NOT complete — this PR has not been reviewed.**\n\n'
+            printf 'The reviewer crashed before reaching a verdict. A red check here is not a rejection, '
+            printf 'and the absence of an approval is not an approval: nothing has looked at this diff.\n\n'
+            printf 'The usual cause is a PR large enough to exhaust the %s-turn budget just reading it. ' "$TURNS"
+            printf 'If that is what happened, splitting this into smaller PRs gets each one reviewed properly.\n\n'
+            printf '[What went wrong](%s) · Push a change to re-run, or ask a human to review before merging.\n' "$RUN_URL"
+          } > /tmp/review-failed.md
+          gh pr comment "$PR" --repo "$REPO" --body-file /tmp/review-failed.md
 
   respond:
     name: respond
