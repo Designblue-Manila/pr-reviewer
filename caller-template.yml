@@ -70,5 +70,5 @@ jobs:
     # Optional overrides:
     # with:
     #   model: claude-opus-5
-    #   max_turns: 60
+    #   max_turns: 120  # leave unset to inherit; a big PR needs the headroom
     #   skip_build: false   # true for a repo with nothing to build

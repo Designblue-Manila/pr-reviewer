@@ -21,9 +21,15 @@ on:
         type: string
         default: claude-opus-5
       max_turns:
-        description: Upper bound on agent turns for one review
+        description: >-
+          Upper bound on agent turns for one review. 60 was not enough for a large PR:
+          ib-e-shop-cms#9 (107 files) burned the whole budget reading the diff and died
+          with "Reached maximum number of turns (60)", so a batched PR got NO review at
+          all while small ones sail through — the wrong way round. Measured rate is
+          ~7.5 turns/min, so 120 lands around 16 min and still fits the job's
+          timeout-minutes: 25. Raise the timeout too if you raise this much further.
         type: number
-        default: 60
+        default: 120
       skip_build:
         description: Skip the build job (repo with nothing to build)
         type: boolean
@@ -313,24 +319,64 @@ jobs:
                  `gh pr review ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --approve --body "…"`
                  ONLY when: build ok (or nothing to build), tests passed or none, impact
                  radius traced with no Important finding, cross-repo handled, and no
-                 secret, key material or .env file was added. The body must begin:
+                 secret, key material or .env file was added. The body is the line
                  "🤖 **Automated review — safe to merge. You can merge this to `${{ github.event.pull_request.base.ref }}` now.**"
-                 followed by one line each: Build, Tests (with the count), Impact radius
-                 (what changed, what uses it, verdict), Cross-repo, Nits (count or "none").
+                 and then AT MOST TWO short lines, only for what the author cannot see
+                 for themselves — a real risk they should watch, or a Nit worth having.
+                 A green build, a passing test count and an impact radius that came back
+                 clean are not worth a line each. Nothing to add is the common case:
+                 send the headline alone.
                - Otherwise REQUEST CHANGES with
                  `gh pr review ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --request-changes --body "…"`.
-                 Begin "🤖 **Automated review — changes requested.**", list every
-                 Important item as `file:line — what breaks — the fix`, add the same
-                 one-line-each summary, and end with
-                 "Push the fix and I will re-review automatically."
+                 Begin "🤖 **Automated review — changes requested.**", then one line per
+                 Important item as `file:line — what breaks — the fix`, then
+                 "Push the fix and I will re-review automatically." Nothing else — no
+                 summary block, no restating what the PR does.
                - Over about 2,000 changed lines: review the riskiest files first, list the
                  files you did not read, add a Nit asking to split the PR, and never
                  approve what you did not read.
                - Never approve a diff that adds a secret, a private key, a token or a .env
                  file, whatever else is true.
 
+            Approve by default. The bar is "does this break or degrade something that
+            works today" — nothing else. If you cannot name what breaks, in which file,
+            and how, it is not an Important finding. Uncertainty is a reason to approve
+            and say what you could not check, never a reason to request changes. Code
+            that is simply not how you would have written it is not a finding at any
+            severity. Do not ask for tests, docs, types or refactors the repo does not
+            already require.
+
             Keep review bodies short and concrete: file paths, line numbers, one sentence
-            per point. No praise, no restating the diff.
+            per point. No praise, no preamble, no restating the diff, no describing your
+            own process. If the reply is longer than the diff deserves, it is wrong.
+
+      # A crashed reviewer and an approving reviewer look identical at merge time: the
+      # author sees a check they have no reason to open. ib-e-shop-cms#9 merged with no
+      # review at all that way on 17 Sep 2026. We cannot block the merge — branch
+      # protection and rulesets are a paid feature these private repos do not have — so
+      # the next best thing is to make the silence impossible to miss. This posts into
+      # the PR thread, which notifies the author, instead of dying in the run log.
+      - name: Say so in the PR when the review could not finish
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TURNS: ${{ inputs.max_turns }}
+        run: |
+          set -euo pipefail
+          # Built with printf, not an indented heredoc: YAML block indentation would be
+          # carried into the body and GitHub would render the whole comment as code.
+          {
+            printf '🤖 **Automated review did NOT complete — this PR has not been reviewed.**\n\n'
+            printf 'The reviewer crashed before reaching a verdict. A red check here is not a rejection, '
+            printf 'and the absence of an approval is not an approval: nothing has looked at this diff.\n\n'
+            printf 'The usual cause is a PR large enough to exhaust the %s-turn budget just reading it. ' "$TURNS"
+            printf 'If that is what happened, splitting this into smaller PRs gets each one reviewed properly.\n\n'
+            printf '[What went wrong](%s) · Push a change to re-run, or ask a human to review before merging.\n' "$RUN_URL"
+          } > /tmp/review-failed.md
+          gh pr comment "$PR" --repo "$REPO" --body-file /tmp/review-failed.md
 
   respond:
     name: respond
@@ -511,7 +557,14 @@ jobs:
                - an argument that is not about any standing finding of yours -> say so; do
                  not invent a finding to match it.
 
-            3. For EVERY Important item in your standing review, decide exactly one of
+            3. Adjudicate ONLY the item (or items) the person actually raised — not your
+               whole standing list. If they asked about one finding, go and check that
+               one finding and answer about it. Leave your other items exactly as they
+               are: do not re-argue them, do not re-state them, do not re-verify them,
+               and never raise something new you noticed while you were in there. A
+               developer who asks about one line gets an answer about that line.
+
+               For each item they DID raise, decide exactly one of
                (if you approved, you have none — go to step 5):
                - **STANDS** — say in one sentence what you re-checked and why it holds.
                - **WITHDRAWN** — say what you checked and what you got wrong. Be direct
@@ -535,12 +588,16 @@ jobs:
 
             5. Post exactly ONE comment with
                `gh pr comment <number> --repo ${{ github.repository }} --body "…"`.
-               Begin it "🤖 **Automated reply.**". Then one short block per Important item:
-               its `file:line`, the verdict from step 3, and one or two sentences. If you
-               approved and there are no items, just answer what they asked, in the same
-               shape: what you checked, `file:line`, what you found. End with the one
-               sentence that tells them what to do next — and when nothing needs doing,
-               say that plainly: the approval stands and they can merge.
+               Begin it "🤖 **Automated reply.**". Then ONE line per item they raised:
+               its `file:line`, the verdict from step 3, and one sentence. If you approved
+               and there are no items, answer what they asked in the same shape: what you
+               checked, `file:line`, what you found. End with one sentence on what to do
+               next — and when nothing needs doing, say so plainly: the approval stands,
+               they can merge.
+
+               Keep it short. No preamble, no recap of the PR, no list of your other
+               findings, no description of how you went about checking. Answer the
+               question and stop.
 
             6. Verdict handling — be careful here:
                - If your standing verdict is APPROVED: post the comment and leave the
