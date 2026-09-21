@@ -31,8 +31,11 @@ count() { tr -cd '0-9\n' | awk '{s+=$1} END {print s+0}'; }
 
 # A verdict counts only if it is the bot's AND it is about THIS commit. A stale approval
 # from an earlier push must not vouch for code nobody has read.
+# The login is matched with or without `[bot]`, as respond-gate.sh does. REST says
+# `claude[bot]` today; if it ever says `claude`, an exact match would put a red check and
+# "nothing has read this diff" on top of a real review, on every PR in every repo.
 verdict="$("$GH" api "repos/$REPO/pulls/$PR/reviews" --paginate \
-  --jq "[.[] | select(.user.login == \"claude[bot]\" and .commit_id == \"$HEAD_SHA\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\"))] | length" \
+  --jq "[.[] | select(((.user.login // \"\") | sub(\"\\\\[bot\\\\]\$\"; \"\")) == \"claude\" and .commit_id == \"$HEAD_SHA\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\"))] | length" \
   2>/dev/null | count || true)"
 
 if [ "${verdict:-0}" -gt 0 ]; then
