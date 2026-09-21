@@ -350,33 +350,73 @@ jobs:
             per point. No praise, no preamble, no restating the diff, no describing your
             own process. If the reply is longer than the diff deserves, it is wrong.
 
-      # A crashed reviewer and an approving reviewer look identical at merge time: the
-      # author sees a check they have no reason to open. ib-e-shop-cms#9 merged with no
-      # review at all that way on 17 Sep 2026. We cannot block the merge — branch
-      # protection and rulesets are a paid feature these private repos do not have — so
-      # the next best thing is to make the silence impossible to miss. This posts into
-      # the PR thread, which notifies the author, instead of dying in the run log.
-      - name: Say so in the PR when the review could not finish
-        if: failure()
+      # Ask GitHub whether a verdict actually exists for this commit, and say so in the
+      # PR when it does not.
+      #
+      # Checking the OUTCOME rather than enumerating failure modes, because the modes do
+      # not look alike and the dangerous one is green:
+      #   - crash (ib-e-shop-cms#9, 17 Sep 2026): turn limit hit, job red, PR merged
+      #     unreviewed anyway. A red tick reads as "some check is unhappy", not
+      #     "nothing has read your code".
+      #   - skip (pr-reviewer#14, 18 Sep 2026): claude-code-action refuses to run when
+      #     the workflow file differs from the default branch's copy — correct, it stops
+      #     a PR editing the reviewer that is reviewing it — but it exits
+      #     `conclusion=success`. The check goes GREEN with no review at all, and an
+      #     `if: failure()` step never fires. It triggers on every PR that touches the
+      #     workflow file: exactly where a bad change does the most damage.
+      # Any future silent no-op lands in the same net without another patch here.
+      #
+      # We cannot block the merge — branch protection and rulesets are a paid GitHub
+      # feature these private repos do not have — so a comment, which notifies the
+      # author, is the strongest available signal.
+      # !cancelled() rather than always(): a cancelled run is someone stopping the job on
+      # purpose, and does not need a comment telling them it did not finish.
+      - name: Confirm a verdict exists, or say so in the PR
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TURNS: ${{ inputs.max_turns }}
+          REVIEW_RESULT: ${{ job.status }}
         run: |
           set -euo pipefail
+
+          # A verdict counts only if it is the bot's AND it is about THIS commit. A stale
+          # approval from an earlier push must not vouch for code nobody has read.
+          verdict="$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+            --jq "[.[] | select(.user.login == \"claude[bot]\" and .commit_id == \"$HEAD_SHA\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\"))] | length" \
+            2>/dev/null || echo 0)"
+          # --paginate prints one count per page, and a failed call prints nothing:
+          # reduce to a single integer so the test below cannot blow up under `set -e`.
+          verdict="$(printf '%s' "$verdict" | tr -cd '0-9\n' | awk '{s+=$1} END {print s+0}')"
+
+          if [ "$verdict" -gt 0 ]; then
+            echo "Verdict present for $HEAD_SHA — nothing to announce."
+            exit 0
+          fi
+
+          echo "No claude[bot] verdict for $HEAD_SHA (job status: $REVIEW_RESULT) — commenting."
+
           # Built with printf, not an indented heredoc: YAML block indentation would be
           # carried into the body and GitHub would render the whole comment as code.
           {
-            printf '🤖 **Automated review did NOT complete — this PR has not been reviewed.**\n\n'
-            printf 'The reviewer crashed before reaching a verdict. A red check here is not a rejection, '
-            printf 'and the absence of an approval is not an approval: nothing has looked at this diff.\n\n'
-            printf 'The usual cause is a PR large enough to exhaust the %s-turn budget just reading it. ' "$TURNS"
-            printf 'If that is what happened, splitting this into smaller PRs gets each one reviewed properly.\n\n'
-            printf '[What went wrong](%s) · Push a change to re-run, or ask a human to review before merging.\n' "$RUN_URL"
-          } > /tmp/review-failed.md
-          gh pr comment "$PR" --repo "$REPO" --body-file /tmp/review-failed.md
+            printf '🤖 **No automated review on this commit — nothing has read this diff.**\n\n'
+            printf 'This is not a rejection, and the absence of an approval is not an approval.\n\n'
+            if [ "$REVIEW_RESULT" = "failure" ]; then
+              printf 'The reviewer stopped before reaching a verdict. The usual cause is a PR large '
+              printf 'enough to exhaust the %s-turn budget just reading it — splitting it up gets each '  "$TURNS"
+              printf 'part reviewed properly.\n\n'
+            else
+              printf 'The reviewer declined to run. That normally means this PR changes the review '
+              printf 'workflow itself, which it is not allowed to review — so this diff needs a human '
+              printf 'before it merges.\n\n'
+            fi
+            printf '[Run log](%s) · Push a change to re-run, or ask a human to review before merging.\n' "$RUN_URL"
+          } > "$RUNNER_TEMP/no-review.md"
+          gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/no-review.md"
 
   respond:
     name: respond
