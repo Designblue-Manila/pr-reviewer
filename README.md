@@ -36,18 +36,28 @@ Designblue-Manila/pr-reviewer/.github/workflows/review.yml
   does not reach a workflow owned by a different account.
 - **What is checked** is written in [REVIEW-STANDARDS.md](REVIEW-STANDARDS.md). That
   file is the rulebook; change it by PR here and every repo follows on its next review.
-- **Releases.** Callers pin to the `v1` tag, not `main` — merging here changes nothing
-  in the field until the tag moves, and rolling back is moving it back. The process,
-  and why it exists, is in [RELEASING.md](RELEASING.md).
-- **Self check.** Every PR here runs `scripts/check-caller-contract.py`, which fails if
-  any job in `review.yml` asks for a permission the callers in the field do not grant.
-  That mistake does not degrade the reviewer, it stops it starting at all, fleet-wide.
+- **Releases.** Callers pin to a release tag (`v2`), not `main` — merging here changes
+  nothing in the field until the tag moves, and rolling back is moving it back. A release
+  is proven on two canary repos first. The process, and why it exists, is in
+  [RELEASING.md](RELEASING.md); `scripts/release.sh` does the checking.
+- **The caller is thin on purpose.** It is the same file in every repo and holds only
+  triggers, permissions, the secret and the pinned tag. What runs and what is skipped —
+  drafts, forks, the `no-review` label, the bot's own comments — is decided by the job
+  `if`s in `review.yml`, so it changes with the tag instead of with a PR in every repo.
+- **Self check.** Every PR here runs `scripts/check-caller-contract.py` and
+  `tests/run.sh`. The first fails if any job asks for a permission the callers in the
+  field do not grant (that mistake stops the reviewer starting at all, fleet-wide), if a
+  gate loses a clause or drifts from `tests/gates.golden`, or if logic creeps back into
+  the caller template. The second drives the two deterministic scripts — who gets
+  answered, and whether a missing review turns the check red — through every branch.
 
 ## Add a repository
 
 1. Install the Claude GitHub App on the owner (github.com/apps/claude) if not yet.
 2. Add the secret: `gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo OWNER/REPO`.
-3. Copy `caller-template.yml` to `.github/workflows/pr-review.yml` and open a PR.
+3. Copy `caller-template.yml`, unchanged, to `.github/workflows/pr-review.yml` — on the
+   default branch **and every other long-lived branch PRs target** (`dev`, `uat`, `prod`…):
+   GitHub runs a PR's workflows from its base branch. Open a PR per branch.
 4. Remove any older per-repo Claude review workflow in the same PR.
 
 On that first PR only the `build` job is meaningful: the Claude action validates the
@@ -68,7 +78,8 @@ exception). It cannot relax security, data, build or impact rules.
 | No run after a push | The PR's diff against the base is empty or only touches ignored paths (`**.md`, `docs/**`); GitHub then skips the workflow. |
 | Read why the build went red | Open the run → artifact `build-results` → the project's `*.log`. |
 | Change a rule | PR to `REVIEW-STANDARDS.md`. |
-| Swap the model | `with: model:` in the caller (see `caller-template.yml`). |
+| Swap the model | The `model` default in `review.yml`, released like any other change. Not in the caller: callers stay identical. |
+| A review never appeared | The `review` check is red and a comment says "No automated review on this commit". Nothing read the diff — get a person to, or push to re-run. |
 | Move to a pay-per-use key | Set `ANTHROPIC_API_KEY` in the repo and change `claude_code_oauth_token` to `anthropic_api_key` in `review.yml`. |
 
 ## The verdict, and what the author does

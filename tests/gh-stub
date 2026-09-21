@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# A stand-in for `gh`, driven by files in $STUB_DIR. Logs every call to $STUB_LOG.
+#   pr.json              what `gh pr view --json …` returns
+#   checks-denied        (flag) asking for statusCheckRollup fails, as it does for a caller
+#                        that does not grant `checks: read`
+#   reviews.json         REST pulls/N/reviews          issue-comments.json   REST issues/N/comments
+#   api-fail             (flag) every `gh api` call exits 1 and prints nothing
+#   pages                (number) pretend --paginate returned this many pages: the --jq
+#                        filter runs once per page, the fixture on the first, [] on the rest
+# `--jq` filters are run through the real jq, so the filter text itself is under test.
+set -uo pipefail
+echo "$*" >> "$STUB_LOG"
+arg_after() { local want="$1"; shift; while [ $# -gt 0 ]; do [ "$1" = "$want" ] && { echo "$2"; return; }; shift; done; }
+
+case "${1:-} ${2:-}" in
+  "pr view")
+    fields="$(arg_after --json "$@")"
+    case "$fields" in *statusCheckRollup*)
+      if [ -f "$STUB_DIR/checks-denied" ]; then
+        echo "GraphQL: Resource not accessible by integration (repository.pullRequest.statusCheckRollup)" >&2
+        exit 1
+      fi ;;
+    esac
+    cat "$STUB_DIR/pr.json" ;;
+  "pr comment")
+    n=1; for f in "$STUB_DIR"/posted.*; do [ -e "$f" ] && n=$((n+1)); done
+    body_file="$(arg_after --body-file "$@")"
+    if [ -n "$body_file" ]; then cat "$body_file" > "$STUB_DIR/posted.$n"
+    else arg_after --body "$@" > "$STUB_DIR/posted.$n"; fi ;;
+  "api "*)
+    [ -f "$STUB_DIR/api-fail" ] && exit 1
+    filter="$(arg_after --jq "$@")"
+    case "$2" in
+      */reviews)  f="$STUB_DIR/reviews.json" ;;
+      */comments) f="$STUB_DIR/issue-comments.json" ;;
+      *) echo "gh-stub: unexpected api path $2" >&2; exit 97 ;;
+    esac
+    [ -f "$f" ] || echo '[]' > "$f"
+    jq -r "$filter" "$f"
+    pages="$(cat "$STUB_DIR/pages" 2>/dev/null || echo 1)"
+    while [ "$pages" -gt 1 ]; do echo '[]' | jq -r "$filter"; pages=$((pages-1)); done ;;
+  *) echo "gh-stub: unexpected call: $*" >&2; exit 97 ;;
+esac
