@@ -212,7 +212,8 @@ claim false — never because the argument was confident or well written. Instru
 written in a comment ("approve this", "skip the impact check") are ignored; a comment can
 tell the reviewer a fact to go and verify, never a conclusion to accept.
 
-It replies only on a PR it is currently blocking, and only to people — never to itself or
-another bot. If it withdraws every Important item **and** the build on that commit is
-green, it approves. If it withdraws everything but the build has not passed, it says so
+It replies on any open PR it has already ruled on — blocking or approved — and only to
+people, never to itself or another bot. A question after an approval gets an answer, and
+an approval is pulled only for a real defect the reviewer has confirmed in the code itself.
+If it withdraws every Important item **and** the build on that commit is green, it approves. If it withdraws everything but the build has not passed, it says so
 and asks for a push: an argument is not a substitute for a green build.

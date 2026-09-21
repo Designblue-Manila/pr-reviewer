@@ -16,6 +16,7 @@ on:
       - '.github/workflows/self-check.yml'
       - 'caller-template.yml'
       - 'scripts/**'
+      - 'tests/**'
   push:
     branches: [main]
 
@@ -40,14 +41,23 @@ jobs:
           curl -sSL -o actionlint.tar.gz \
             https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
           tar -xzf actionlint.tar.gz actionlint
-          ./actionlint .github/workflows/review.yml .github/workflows/self-check.yml
+          # `job.workflow_sha` is documented by GitHub but newer than actionlint's type
+          # table; this ignores that one property and nothing else.
+          ./actionlint -ignore 'property "workflow_sha" is not defined' \
+            .github/workflows/review.yml .github/workflows/self-check.yml
           # the caller template is a workflow too, but only once it is in the right place
           mkdir -p /tmp/caller/.github/workflows
           cp caller-template.yml /tmp/caller/.github/workflows/pr-review.yml
           ./actionlint /tmp/caller/.github/workflows/pr-review.yml
 
-      - name: build.sh parses
-        run: bash -n scripts/build.sh
+      - name: Gate scripts and the contract checker behave (offline, stubbed gh)
+        # respond-gate.sh and verdict-check.sh decide who gets answered and whether a
+        # missing review turns the check red; the last group mutates review.yml and the
+        # caller template and proves the contract check above catches each mutation.
+        run: bash tests/run.sh
+
+      - name: Shell scripts parse
+        run: for f in scripts/*.sh tests/run.sh tests/gh-stub; do bash -n "$f" || exit 1; done
 
       - name: build.sh detects a Laravel project correctly
         # the PHP-from-lockfile fix had no test; this is the cheapest one that would
