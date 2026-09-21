@@ -40,7 +40,9 @@ Designblue-Manila/pr-reviewer/.github/workflows/review.yml
   nothing in the field until the tag moves, and rolling back is moving it back. A release
   is proven on two canary repos first. The process, and why it exists, is in
   [RELEASING.md](RELEASING.md); `scripts/release.sh` does the checking.
-- **The caller is thin on purpose.** It is the same file in every repo and holds only
+- **The caller is thin on purpose.** (Migration in progress as of 21 Sep 2026: repos
+  installed earlier still carry a larger caller pinned to `v1`, this repo's own included,
+  until the fleet round in RELEASING.md is done.) It is the same file in every repo and holds only
   triggers, permissions, the secret and the pinned tag. What runs and what is skipped —
   drafts, forks, the `no-review` label, the bot's own comments — is decided by the job
   `if`s in `review.yml`, so it changes with the tag instead of with a PR in every repo.

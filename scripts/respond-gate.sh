@@ -39,6 +39,8 @@ esac
 # to the repo get a model call. Private repos skip this: everyone who can comment there is
 # already one of ours, and GitHub reports a member whose membership is private as NONE —
 # filtering on it there would bring back the silence bug for exactly those developers.
+# An EMPTY value reads as private for the same reason: GitHub always sends the field, and
+# of the two ways to be wrong, silence for our own developers is the one that has bitten.
 if [ "${REPO_PRIVATE:-true}" != "true" ]; then
   case "${COMMENT_ASSOC:-NONE}" in
     OWNER|MEMBER|COLLABORATOR|CONTRIBUTOR) ;;
@@ -67,7 +69,7 @@ base=$(jq  -r .baseRefName "$RUNNER_TEMP/pr.json")
 # from draining the subscription: count our own comments on this PR in the last hour.
 recent=$(jq -r --argjson max_age 3600 '[.comments[]?
   | select((.author.login // "") | test("^(claude|github-actions)(\\[bot\\])?$"))
-  | select(((.createdAt // "1970-01-01T00:00:00Z") | fromdateiso8601) > (now - $max_age))] | length' \
+  | select(((.createdAt // "") | (fromdateiso8601? // 0)) > (now - $max_age))] | length' \
   "$RUNNER_TEMP/pr.json")
 if [ "$recent" -gt "$MAX_REPLIES_PER_HOUR" ]; then
   no "Circuit breaker: $recent automated comments on this PR in the last hour (limit $MAX_REPLIES_PER_HOUR); not answering."
@@ -87,7 +89,9 @@ verdict=$(jq -r '[.reviews[]?
   | last | .state // "none"' "$RUNNER_TEMP/pr.json")
 
 # Did the deterministic build job pass on this head? `unknown` = could not read it.
-build=$(jq -r '[.statusCheckRollup[]? | select(.name == "build")] | last | .conclusion // "unknown"' \
+# Lower-cased: GitHub reports SUCCESS, the adjudication prompt says `success`, and a model
+# reading that literally would never take the "all withdrawn + green build -> approve" path.
+build=$(jq -r '[.statusCheckRollup[]? | select(.name == "build")] | last | (.conclusion // "unknown") | ascii_downcase' \
   "$RUNNER_TEMP/pr.json")
 
 echo "state=$state draft=$draft verdict=$verdict build=$build"
@@ -119,6 +123,7 @@ if [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$verdict" = none ]; then
   if [ "$have" = 0 ]; then
     "$GH" pr comment "$PR" --body "$(printf '%s\n\n%s\n\n%s\n' "$marker" \
       "🤖 **No review on record for this pull request** — so there is nothing here for me to answer." \
-      "I review a pull request when it is opened or pushed to, and this one was already open before I reached this repository. Push any commit to the branch, or close and reopen the PR, and I will build it and post a full review.")"
+      "I review a pull request when it is opened or pushed to, and this one was already open before I reached this repository. Push any commit to the branch, or close and reopen the PR, and I will build it and post a full review.")" \
+      || echo "::warning::Could not post the no-verdict note."   # cosmetic: never turn the check red over it
   fi
 fi

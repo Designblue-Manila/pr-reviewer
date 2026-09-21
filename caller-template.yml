@@ -3,7 +3,8 @@
 # runs a pull request's workflows from its BASE branch. The repository also needs one
 # secret: CLAUDE_CODE_OAUTH_TOKEN.
 #
-# This file is identical in every repository and holds only what GitHub will not let the
+# This file is identical in every repository (the two canary repos differ in the tag on the
+# `uses:` line, nothing else) and holds only what GitHub will not let the
 # shared workflow hold: the events that wake it, the permissions it may use, the secret
 # and the pinned release. What runs and what is skipped (drafts, forks, bot comments, the
 # `no-review` label), and what cancels what, is decided in the shared workflow — so it

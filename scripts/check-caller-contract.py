@@ -77,6 +77,11 @@ MANDATORY = {
 }
 # ...and the bot filter must appear once per clause of `respond`.
 BOT_FILTER = "github.event.comment.user.type != 'Bot'"
+# A gate is a chain of ANDs; `respond` is two such chains joined by ONE `||`. Any other
+# `||` widens it — `… || true`, or a whole extra clause — while every mandatory substring
+# is still present and a regenerated golden file still matches. Counting them is what
+# actually stops a widening; the golden copy only makes a change visible.
+ALLOWED_ORS = {"build": 0, "review": 0, "respond": 1}
 
 RANK = {"none": 0, "read": 1, "write": 2}
 KEY = re.compile(r"^(\s*)([A-Za-z_][\w.-]*):\s*(.*?)\s*$")
@@ -119,6 +124,13 @@ def job_permissions(path):
         # jobs -> <job> -> permissions -> <scope>: <level>
         if len(path_keys) == 4 and path_keys[0] == "jobs" and path_keys[2] == "permissions" and value:
             jobs.setdefault(path_keys[1], {})[key] = value
+        # jobs -> <job> -> permissions: write-all   (the scalar shorthand, one level up).
+        # Until 21 Sep 2026 this was invisible here: the job read as asking for nothing,
+        # and `write-all` — the 16 Sep outage in two words — passed every guard.
+        elif len(path_keys) == 3 and path_keys[0] == "jobs" and key == "permissions":
+            jobs.setdefault(path_keys[1], {})["__declared__"] = "yes"
+            if value and value != "{}":
+                jobs[path_keys[1]]["__scalar__"] = value
         elif len(path_keys) == 2 and path_keys[0] == "jobs":
             jobs.setdefault(key, {})
     return jobs
@@ -197,7 +209,20 @@ def main(review_path="./.github/workflows/review.yml", caller_path="./caller-tem
     problems = []
 
     for job, perms in job_permissions(review_path).items():
+        if "__scalar__" in perms:
+            problems.append(
+                f"{review_path}: job `{job}` says `permissions: {perms['__scalar__']}`. Spell the scopes "
+                f"out: a blanket grant asks for more than callers give, and GitHub then refuses to "
+                f"START the whole workflow on every repo."
+            )
+        if "__declared__" not in perms:
+            problems.append(
+                f"{review_path}: job `{job}` has no `permissions:` block, so this check cannot see "
+                f"what it uses. Declare them, even when they match the caller's."
+            )
         for scope, level in perms.items():
+            if scope.startswith("__"):
+                continue
             granted = FIELD_GRANTS.get(scope, "none")
             if rank(level) > rank(granted):
                 problems.append(
@@ -208,6 +233,8 @@ def main(review_path="./.github/workflows/review.yml", caller_path="./caller-tem
                 )
 
     for job, perms in job_permissions(caller_path).items():
+        if "__scalar__" in perms:
+            problems.append(f"{caller_path}: job `{job}` uses `permissions: {perms['__scalar__']}`; spell the scopes out.")
         for scope, needed in FIELD_GRANTS.items():
             if rank(perms.get(scope, "none")) < rank(needed):
                 problems.append(
@@ -229,6 +256,12 @@ def main(review_path="./.github/workflows/review.yml", caller_path="./caller-tem
         for clause in clauses:
             if clause not in expr:
                 problems.append(f"{review_path}: job `{job}` gate lost its clause `{clause}`.")
+        if expr.count("||") != ALLOWED_ORS[job]:
+            problems.append(
+                f"{review_path}: job `{job}` gate has {expr.count('||')} `||`, expected exactly "
+                f"{ALLOWED_ORS[job]}. An extra `||` WIDENS the gate: `… || true` or an added clause "
+                f"lets through what the ANDs were keeping out (for `respond`: the bot's own comments)."
+            )
         if job == "respond" and expr.count(BOT_FILTER) < 2:
             problems.append(
                 f"{review_path}: job `respond` must carry `{BOT_FILTER}` in BOTH clauses; without "

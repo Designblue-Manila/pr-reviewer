@@ -66,7 +66,7 @@ check "checks:read denied -> falls back, build=unknown, answers (the 16-17 Sep s
       "0/true/unknown/2" "$rc/$(out answer)/$(out build)/$(calls 'pr view')"
 fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' '[{"name":"build","conclusion":"SUCCESS"}]'
 rc=$(gate)
-check "checks readable -> build result passed through" "0/true/SUCCESS/CHANGES_REQUESTED" \
+check "checks readable -> build result lower-cased to match the prompt" "0/true/success/CHANGES_REQUESTED" \
       "$rc/$(out answer)/$(out build)/$(out verdict)"
 fresh; pr_json OPEN false APPROVED stranger site
 rc=$(gate)
@@ -86,6 +86,10 @@ humans="$(jq -n --arg t "$(iso_ago 60)" '[range(9) | {author:{login:"mark"},crea
 fresh; pr_json OPEN false APPROVED acme site "$humans"
 rc=$(gate)
 check "9 human comments do not trip the breaker" "0/true" "$rc/$(out answer)"
+bad_ts='[{"author":{"login":"claude"},"createdAt":"not-a-date","body":"x"},{"author":{"login":"claude"},"body":"y"}]'
+fresh; pr_json OPEN false APPROVED acme site "$bad_ts"
+rc=$(gate)
+check "malformed / missing comment timestamp does not kill the gate" "0/true" "$rc/$(out answer)"
 fresh; pr_json OPEN false none acme site
 rc=$(gate)
 check "no verdict on record -> no answer, ONE deterministic note" "0/false/1" "$rc/$(out answer)/$(posted)"
@@ -154,6 +158,17 @@ check "REVIEWER_REF pointed at main -> caught"    1 "$(contract 's/^  REVIEWER_R
 check "template pinned to @main -> caught"        1 "$(contract '' 's/review\.yml\@v2$/review.yml\@main/m')"
 check "an if: put back in the template -> caught" 1 "$(contract '' 's/^  pr-review:$/  pr-review:\n    if: github.actor != 0/m')"
 check "template grants less than the field (issues: none) -> caught" 1 "$(contract '' 's/^      issues: read$/      issues: none/m')"
+check "permissions: write-all on a job (invisible to the checker until 21 Sep) -> caught" 1 "$(contract 's/^    permissions:\n      # MUST stay within.*?id-token: write\n/    permissions: write-all\n/ms' '')"
+check "a job's permissions block deleted -> caught" 1 "$(contract 's/^    permissions:\n      contents: read\n    outputs:/    outputs:/m' '')"
+golden_too() { # widen a gate AND regenerate the golden, as an author told "regenerate it" would
+  local d; d="$(mktemp -d)"; mkdir -p "$d/tests"
+  perl -0pe "$1" "$ROOT/.github/workflows/review.yml" > "$d/review.yml"
+  python3 "$ROOT/scripts/check-caller-contract.py" --print-gates "$d/review.yml" > "$d/tests/gates.golden"
+  python3 "$ROOT/scripts/check-caller-contract.py" "$d/review.yml" "$ROOT/caller-template.yml" "$d/tests/gates.golden" >"$d/out" 2>&1
+  echo $?
+}
+check "respond widened with an extra || clause, golden regenerated -> STILL caught" 1 "$(golden_too "s/        \\)\\n      \\}\\}\\n    # One answer/        ) || github.event_name == 'issue_comment'\\n      }}\\n    # One answer/")"
+check "bot filter neutered with '|| true', golden regenerated -> STILL caught" 1 "$(golden_too "s/github\\.event\\.comment\\.user\\.type != 'Bot' &&/(github.event.comment.user.type != 'Bot' || true) \&\&/g")"
 check "a job with no gate at all -> caught"       1 "$(contract 's/^    name: build\n    if: >-\n/    name: build\n    env:\n      X: >-\n/m' '')"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

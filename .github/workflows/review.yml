@@ -189,7 +189,10 @@ jobs:
         id: result
         if: always()
         run: |
-          [ -f .build-results/summary.txt ] || printf 'overall=red reasons=build script did not produce a summary\n' > .build-results/summary.txt
+          # a step BEFORE build.sh can fail (toolchain setup, cache, checkout): the folder
+          # does not exist yet, and without it this step died too and published nothing.
+          mkdir -p .build-results
+          [ -f .build-results/summary.txt ] || printf 'overall=red reasons=the build job failed before it reached the build script (toolchain setup?) - see the run log\n' > .build-results/summary.txt
           {
             echo "summary<<__EOS__"
             cat .build-results/summary.txt
@@ -250,6 +253,9 @@ jobs:
           path: .pr-reviewer
           persist-credentials: false
 
+      - name: Which release is this
+        run: echo "workflow_sha=${{ job.workflow_sha || 'fallback' }} scripts=$(git -C .pr-reviewer rev-parse HEAD)"
+
       - name: Download build logs
         if: needs.build.result != 'skipped'
         continue-on-error: true
@@ -284,7 +290,7 @@ jobs:
             Build summary (one line per project, written by the deterministic build job;
             full logs are in .build-results/<project>/ — install.log, build.log, boot.log,
             migrate.log, test.log, lint.log):
-            ${{ needs.build.outputs.summary || 'build job skipped: nothing to build in this repository' }}
+            ${{ needs.build.outputs.summary || (needs.build.result == 'skipped' && 'build job skipped: nothing to build in this repository' || 'overall=red reasons=the build job FAILED before producing a summary. Treat the build as RED, not as "nothing to build".') }}
 
             ## Ground rules
             - Read `.pr-reviewer/REVIEW-STANDARDS.md` first. It defines "safe to merge",
@@ -448,11 +454,14 @@ jobs:
       }}
     # One answer at a time per PR; a second human comment replaces the answer in flight
     # (the new run reads the whole conversation). A job skipped by the `if` above should
-    # never enter this group — and if GitHub ever evaluates it the other way round, the
-    # expression below still stops a bot comment from cancelling a running answer.
+    # never enter this group — but whether GitHub evaluates a job's `if` before its
+    # concurrency is not documented, so the expression below is an ALLOW-list: only a
+    # person's comment may cancel a running answer. Written as `!= 'Bot'` it was TRUE on a
+    # push (no `comment` in the event: null != 'Bot'), so asking a question and then
+    # pushing the fix could have cancelled the answer.
     concurrency:
       group: prr-${{ github.event.issue.number || github.event.pull_request.number }}-reply
-      cancel-in-progress: ${{ github.event.comment.user.type != 'Bot' }}
+      cancel-in-progress: ${{ github.event.comment.user.type == 'User' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -476,6 +485,9 @@ jobs:
           ref: ${{ job.workflow_sha || env.REVIEWER_REF }}
           path: .pr-reviewer
           persist-credentials: false
+
+      - name: Which release is this
+        run: echo "workflow_sha=${{ job.workflow_sha || 'fallback' }} scripts=$(git -C .pr-reviewer rev-parse HEAD)"
 
       - name: Decide whether there is anything to answer
         id: gate

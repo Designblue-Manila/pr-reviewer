@@ -13,7 +13,7 @@ Callers pin to a tag. `main` is where work lands; a tag is what runs.
 | | what it is | who follows it |
 |---|---|---|
 | `main` | latest reviewed work | nothing in production |
-| `v2-canary` | the next release, being proven | two canary repos (one Laravel, one Nuxt) |
+| `v2-canary` | the next release, being proven | two canary repos (one Laravel, one Nuxt). Their caller is the template with this tag in place of `v2` — the only permitted difference, and `fleet.sh` knows it. |
 | `v2` | the release | every thin caller — the current `caller-template.yml` |
 | `v1` | the same commit as `v2` | callers installed before 21 Sep 2026, which still carry their own filter. Retires when `fleet.sh census` shows nothing pinned to it. |
 
@@ -56,8 +56,13 @@ before that change, a thin caller would let the `respond` job answer the bot's o
 — a loop, paid for out of one person's Claude subscription.
 
 So no release tag may ever point below the first gated commit. `release.sh` enforces it by
-content: it runs **today's** contract checker against the target commit's files and refuses
-a `review.yml` whose gates are missing or do not match its `tests/gates.golden`. Behind it,
+content: it runs **today's** contract checker against the target commit's files. The floor
+is that checker's own rules — every gate carries its mandatory clauses, carries no `||`
+beyond the one `respond` needs (an extra `||` is how a gate gets widened while still
+"containing" every clause), and no job asks for more than the field grants.
+`tests/gates.golden` is not part of the floor: it makes a gate change visible in review,
+and a person reviewing that diff is the check on a change that is deliberate but wrong —
+the reviewer cannot review a PR that edits its own workflow. Behind all of it,
 `scripts/respond-gate.sh` re-checks the comment author itself and carries a circuit breaker
 (more than 6 automated comments on one PR in an hour → it stops answering).
 

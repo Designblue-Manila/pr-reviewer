@@ -28,7 +28,10 @@ FLEET_TAGS="v1 v2"                           # v1 first: see "Order" below
 
 die()  { printf '\nREFUSED: %s\n' "$*" >&2; exit 1; }
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
-remote_tag() { git -C "$ROOT" ls-remote --tags origin "refs/tags/$1" | cut -f1; }
+# The COMMIT a remote tag points at. An annotated tag lists twice — the tag object, then
+# the peeled `^{}` commit — and only the second can ever equal a commit SHA; `tail -1`
+# takes it when it is there and the plain line when the tag is lightweight.
+remote_tag() { git -C "$ROOT" ls-remote --tags origin "refs/tags/$1" "refs/tags/$1^{}" | tail -1 | cut -f1; }
 tag_commands() { # tag, commit
   printf '  git tag -f %s %s\n' "$1" "$2"
   printf '  git push -f origin %s\n' "$1"
@@ -59,14 +62,20 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 git -C "$ROOT" archive "$target" | tar -x -C "$work" || die "could not export $target"
 # The contract check is TODAY's checker run on THAT commit's files: an old commit's own
 # checker knows nothing about gates and would wave an ungated review.yml through.
+# What makes this a floor is the checker's own rules — mandatory clauses, no extra `||`,
+# permissions within the field's grants. The golden file is the TARGET's, so it proves only
+# that the commit is consistent with itself; it is not what stops a weakened gate.
+# "Today's checker" has to mean the reviewed one, not an edited copy on this machine:
+[ -z "$(git -C "$ROOT" status --porcelain -- scripts/check-caller-contract.py)" ] \
+  || die "scripts/check-caller-contract.py has uncommitted changes. The floor is judged with it; commit or stash first."
+command -v actionlint >/dev/null \
+  || die "actionlint is not installed. A release is not printed without it (brew install actionlint)."
 python3 "$ROOT/scripts/check-caller-contract.py" \
     "$work/.github/workflows/review.yml" "$work/caller-template.yml" "$work/tests/gates.golden" \
   || die "that commit's review.yml does not gate itself (or breaks the caller contract). Thin callers would loop on it — this is the release floor."
 ( cd "$work" && bash tests/run.sh >/dev/null ) || die "tests/run.sh fails at that commit (run it to see which)"
-if command -v actionlint >/dev/null; then
-  ( cd "$work" && actionlint -ignore 'property "workflow_sha" is not defined' .github/workflows/review.yml ) \
-    || die "actionlint fails at that commit"
-fi
+( cd "$work" && actionlint -ignore 'property "workflow_sha" is not defined' .github/workflows/review.yml ) \
+  || die "actionlint fails at that commit"
 
 if [ "$mode" = canary ]; then
   say "Checks pass. Run this, then reopen the standing test PR in each canary repo:"
