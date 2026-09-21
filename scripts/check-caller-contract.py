@@ -71,6 +71,7 @@ MANDATORY = {
         "github.event.issue.state == 'open'",
         "!contains(github.event.issue.labels.*.name, 'no-review')",
         "github.event_name == 'pull_request_review_comment'",
+        "github.event.pull_request.draft == false",
         "github.event.pull_request.head.repo.full_name == github.repository",
         "!contains(github.event.pull_request.labels.*.name, 'no-review')",
     ],
@@ -82,6 +83,12 @@ BOT_FILTER = "github.event.comment.user.type != 'Bot'"
 # is still present and a regenerated golden file still matches. Counting them is what
 # actually stops a widening; the golden copy only makes a change visible.
 ALLOWED_ORS = {"build": 0, "review": 0, "respond": 1}
+# The other direction: a clause that is NOT in the mandatory list (`!inputs.skip_build`,
+# `needs.build.result != 'cancelled'`) can be deleted with no new `||` and every listed
+# substring still present. Counting `&&` makes every clause load-bearing: adding or
+# removing one is a deliberate edit of this number, in a file a person reviews.
+ALLOWED_ANDS = {"build": 4, "review": 5, "respond": 8}
+assert set(ALLOWED_ORS) == set(ALLOWED_ANDS) == set(MANDATORY)
 
 RANK = {"none": 0, "read": 1, "write": 2}
 KEY = re.compile(r"^(\s*)([A-Za-z_][\w.-]*):\s*(.*?)\s*$")
@@ -129,7 +136,9 @@ def job_permissions(path):
         # and `write-all` — the 16 Sep outage in two words — passed every guard.
         elif len(path_keys) == 3 and path_keys[0] == "jobs" and key == "permissions":
             jobs.setdefault(path_keys[1], {})["__declared__"] = "yes"
-            if value and value != "{}":
+            # `{}` included: it grants NOTHING, so the job could no longer post a verdict —
+            # a red `review` check on every PR in every repo, with no comment to say why.
+            if value:
                 jobs[path_keys[1]]["__scalar__"] = value
         elif len(path_keys) == 2 and path_keys[0] == "jobs":
             jobs.setdefault(key, {})
@@ -212,8 +221,8 @@ def main(review_path="./.github/workflows/review.yml", caller_path="./caller-tem
         if "__scalar__" in perms:
             problems.append(
                 f"{review_path}: job `{job}` says `permissions: {perms['__scalar__']}`. Spell the scopes "
-                f"out: a blanket grant asks for more than callers give, and GitHub then refuses to "
-                f"START the whole workflow on every repo."
+                f"out, one per line: a blanket grant asks for more than callers give (GitHub then refuses "
+                f"to START the whole workflow on every repo), and an empty one leaves the job unable to post."
             )
         if "__declared__" not in perms:
             problems.append(
@@ -242,6 +251,16 @@ def main(review_path="./.github/workflows/review.yml", caller_path="./caller-tem
                     f"the `{scope}: {needed}` the workflow relies on."
                 )
 
+    # A workflow-level `permissions:` in review.yml is outside what job_permissions() reads.
+    # Whether GitHub checks it against the caller's grant is not something to find out on
+    # the fleet: grant per job only.
+    top = re.search(r"^permissions:[ \t]*(.*)$", open(review_path).read(), re.M)
+    if top:
+        problems.append(
+            f"{review_path}: workflow-level `permissions:` ({top.group(1) or 'a block'}). Grant per job "
+            f"only — this check reads job blocks, and a called workflow must stay within its caller's grant."
+        )
+
     # 3. the gates
     gates = job_gates(review_path)
     golden = read_golden(golden_path)
@@ -261,6 +280,12 @@ def main(review_path="./.github/workflows/review.yml", caller_path="./caller-tem
                 f"{review_path}: job `{job}` gate has {expr.count('||')} `||`, expected exactly "
                 f"{ALLOWED_ORS[job]}. An extra `||` WIDENS the gate: `… || true` or an added clause "
                 f"lets through what the ANDs were keeping out (for `respond`: the bot's own comments)."
+            )
+        if expr.count("&&") != ALLOWED_ANDS[job]:
+            problems.append(
+                f"{review_path}: job `{job}` gate has {expr.count('&&')} `&&`, expected exactly "
+                f"{ALLOWED_ANDS[job]}. A clause was added or dropped. If that is intended, change "
+                f"ALLOWED_ANDS in this script in the same PR, so the change is reviewed as one."
             )
         if job == "respond" and expr.count(BOT_FILTER) < 2:
             problems.append(

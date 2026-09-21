@@ -29,9 +29,12 @@ FLEET_TAGS="v1 v2"                           # v1 first: see "Order" below
 die()  { printf '\nREFUSED: %s\n' "$*" >&2; exit 1; }
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 # The COMMIT a remote tag points at. An annotated tag lists twice — the tag object, then
-# the peeled `^{}` commit — and only the second can ever equal a commit SHA; `tail -1`
-# takes it when it is there and the plain line when the tag is lightweight.
-remote_tag() { git -C "$ROOT" ls-remote --tags origin "refs/tags/$1" "refs/tags/$1^{}" | tail -1 | cut -f1; }
+# the peeled `^{}` commit — and only the second can ever equal a commit SHA. Take the
+# peeled line wherever it appears; fall back to the plain one for a lightweight tag.
+remote_tag() {
+  git -C "$ROOT" ls-remote --tags origin "refs/tags/$1" "refs/tags/$1^{}" \
+    | awk '/\^\{\}$/ {print $1; found=1; exit} {last=$1} END {if (!found && last) print last}'
+}
 tag_commands() { # tag, commit
   printf '  git tag -f %s %s\n' "$1" "$2"
   printf '  git push -f origin %s\n' "$1"
@@ -67,7 +70,7 @@ git -C "$ROOT" archive "$target" | tar -x -C "$work" || die "could not export $t
 # that the commit is consistent with itself; it is not what stops a weakened gate.
 # "Today's checker" has to mean the reviewed one, not an edited copy on this machine:
 [ -z "$(git -C "$ROOT" status --porcelain -- scripts/check-caller-contract.py)" ] \
-  || die "scripts/check-caller-contract.py has uncommitted changes. The floor is judged with it; commit or stash first."
+  || die "scripts/check-caller-contract.py has uncommitted changes. The floor is judged with it. Rolling back in a hurry? Run: git stash push scripts/check-caller-contract.py"
 command -v actionlint >/dev/null \
   || die "actionlint is not installed. A release is not printed without it (brew install actionlint)."
 python3 "$ROOT/scripts/check-caller-contract.py" \

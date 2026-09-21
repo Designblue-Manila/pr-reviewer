@@ -147,7 +147,7 @@ contract() { # perl substitution for review.yml, perl substitution for the templ
   python3 "$ROOT/scripts/check-caller-contract.py" "$d/review.yml" "$d/caller.yml" "$d/tests/gates.golden" >"$d/out" 2>&1
   echo $?
 }
-# no /g anywhere: each substitution hits the FIRST occurrence only
+# first occurrence only, except where a case says it needs every occurrence (/g)
 check "unmodified files pass"                     0 "$(contract '' '')"
 check "respond asks for issues: write (the 16 Sep outage) -> caught" 1 "$(contract 's/^      issues: read$/      issues: write/m' '')"
 check "bot filter removed from ONE respond clause -> caught" 1 "$(contract "s/github\\.event\\.comment\\.user\\.type != 'Bot' &&//" '')"
@@ -169,6 +169,10 @@ golden_too() { # widen a gate AND regenerate the golden, as an author told "rege
 }
 check "respond widened with an extra || clause, golden regenerated -> STILL caught" 1 "$(golden_too "s/        \\)\\n      \\}\\}\\n    # One answer/        ) || github.event_name == 'issue_comment'\\n      }}\\n    # One answer/")"
 check "bot filter neutered with '|| true', golden regenerated -> STILL caught" 1 "$(golden_too "s/github\\.event\\.comment\\.user\\.type != 'Bot' &&/(github.event.comment.user.type != 'Bot' || true) \&\&/g")"
+check "permissions: {} on the review job (can no longer post a verdict) -> caught" 1 "$(contract 's/^    timeout-minutes: 25\n    permissions:\n      contents: read\n      pull-requests: write\n      issues: read\n      id-token: write\n/    timeout-minutes: 25\n    permissions: {}\n/m' '')"
+check "workflow-level permissions: write-all in review.yml -> caught" 1 "$(contract 's/^env:\n/permissions: write-all\n\nenv:\n/m' '')"
+check "unlisted clause dropped (!inputs.skip_build), golden regenerated -> STILL caught" 1 "$(golden_too 's/ &&\n        !inputs\.skip_build//')"
+check "respond stops skipping DRAFT PRs, golden regenerated -> STILL caught" 1 "$(golden_too "s/(github\\.event_name == 'pull_request_review_comment' &&\\n)          github\\.event\\.pull_request\\.draft == false &&\\n/\$1/")"
 check "a job with no gate at all -> caught"       1 "$(contract 's/^    name: build\n    if: >-\n/    name: build\n    env:\n      X: >-\n/m' '')"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
