@@ -55,9 +55,11 @@ fi
 # how two developers were left without an answer on 16-17 Sep 2026. So: ask for it, and
 # fall back to the same query without it.
 fields=state,isDraft,headRefOid,baseRefName,reviews,comments,headRepositoryOwner,headRepository
+checks_read=true
 if ! "$GH" pr view "$PR" --json "$fields,statusCheckRollup" > "$RUNNER_TEMP/pr.json" 2>"$RUNNER_TEMP/pr.err"; then
   echo "::notice::Could not read status checks ($(tr -d '\n' < "$RUNNER_TEMP/pr.err")); continuing without them."
   "$GH" pr view "$PR" --json "$fields" > "$RUNNER_TEMP/pr.json"
+  checks_read=false
 fi
 
 state=$(jq -r .state       "$RUNNER_TEMP/pr.json")
@@ -82,31 +84,61 @@ if [ "$headrepo" != "$GH_REPO" ]; then
   no "Fork pull request ($headrepo); not answering."
 fi
 
-# The reviewer's own most recent verdict. It posts as `claude` or `claude[bot]`.
-verdict=$(jq -r '[.reviews[]?
-  | select((.author.login // "") | sub("\\[bot\\]$";"") == "claude")
-  | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")]
-  | last | .state // "none"' "$RUNNER_TEMP/pr.json")
+# The reviewer's own most recent STANDING verdict, and the commit it was given on. It
+# posts as `claude` or `claude[bot]`. A dismissed review is not a verdict — but it is a
+# ruling: when every verdict it gave here was dismissed (by a person, or by
+# approval-guard.sh / respond-withdraw.sh — GitHub does not say who), verdict=DISMISSED,
+# so the conversation goes on instead of a false "no review on record".
+bot_reviews='[.reviews[]? | select((.author.login // "") | sub("\\[bot\\]$";"") == "claude")]'
+last_verdict="$bot_reviews | map(select(.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | last"
+verdict=$(jq -r "$last_verdict | .state // \"none\"" "$RUNNER_TEMP/pr.json")
+reviewed_sha=$(jq -r "$last_verdict | .commit.oid // \"\"" "$RUNNER_TEMP/pr.json")
+if [ "$verdict" = none ] && [ "$(jq -r "$bot_reviews | map(select(.state == \"DISMISSED\")) | length" "$RUNNER_TEMP/pr.json")" -gt 0 ]; then
+  verdict=DISMISSED
+fi
 
-# Did the deterministic build job pass on this head? `unknown` = could not read it.
-# Lower-cased: GitHub reports SUCCESS, the adjudication prompt says `success`, and a model
-# reading that literally would never take the "all withdrawn + green build -> approve" path.
-build=$(jq -r '[.statusCheckRollup[]? | select(.name == "build")] | last | (.conclusion // "unknown") | ascii_downcase' \
-  "$RUNNER_TEMP/pr.json")
+# Did OUR build job pass on this head? Matched by provenance, not by a bare name: a check
+# run from this same caller workflow (WORKFLOW_NAME = github.workflow), whose job is
+# `build` — GitHub names it `<caller job> / build`, e.g. `pr-review / build`; the bare
+# `build` this used to look for never matched a real caller. Another workflow's `build`
+# never counts. Re-runs: the newest start wins; two different results started at the
+# same moment is `unknown`, never the nicer of the two.
+#   success | failure | cancelled | … (GitHub's conclusion, lower-cased for the prompt)
+#   pending    still running        unknown  no such check, or ambiguous
+#   unreadable this job may not read checks (no `checks: read`) — a setup gap, not a red build
+if [ "$checks_read" = false ]; then
+  build=unreadable
+else
+  build=$(jq -r --arg wf "${WORKFLOW_NAME:-}" '
+    [.statusCheckRollup[]?
+      | select((.__typename // "CheckRun") == "CheckRun")
+      | select($wf != "" and (.workflowName // "") == $wf)
+      | select(.name == "build" or ((.name // "") | endswith(" / build")))]
+    | if length == 0 then "unknown"
+      # a re-run still queued has no start time yet: it outranks any finished attempt
+      elif any(.[]; (.status // "COMPLETED") != "COMPLETED") then "pending" else
+        (max_by(.startedAt // "") | .startedAt // "") as $t
+        | [.[] | select((.startedAt // "") == $t)] as $newest
+        | if ([$newest[] | [.status, .conclusion]] | unique | length) > 1 then "unknown"
+          elif ($newest[0].status // "COMPLETED") != "COMPLETED" then "pending"
+          else ($newest[0].conclusion // "unknown" | ascii_downcase) end
+      end' "$RUNNER_TEMP/pr.json")
+fi
 
-echo "state=$state draft=$draft verdict=$verdict build=$build"
+echo "state=$state draft=$draft verdict=$verdict reviewed=$reviewed_sha build=$build"
 {
   echo "head=$head"
   echo "base=$base"
   echo "build=$build"
   echo "verdict=$verdict"
+  echo "reviewed_sha=$reviewed_sha"
 } >> "$GITHUB_OUTPUT"
 
 # 5. Answer on any open, non-draft PR this reviewer has already ruled on, blocking or not.
 # A question asked after an approval deserves an answer too, and an approval that turns
 # out to be wrong has to be withdrawable.
 if [ "$state" = OPEN ] && [ "$draft" = false ] \
-   && { [ "$verdict" = CHANGES_REQUESTED ] || [ "$verdict" = APPROVED ]; }; then
+   && { [ "$verdict" = CHANGES_REQUESTED ] || [ "$verdict" = APPROVED ] || [ "$verdict" = DISMISSED ]; }; then
   echo "answer=true" >> "$GITHUB_OUTPUT"
   exit 0
 fi

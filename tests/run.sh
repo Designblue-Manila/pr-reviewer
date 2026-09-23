@@ -27,7 +27,7 @@ iso_ago() { # seconds ago -> ISO 8601 UTC, BSD or GNU date
 # pr.json builder: state draft verdict-state headrepo-owner headrepo-name [comments-json] [checks-json]
 pr_json() {
   local reviews='[]'
-  [ "$3" != none ] && reviews="[{\"author\":{\"login\":\"claude\"},\"state\":\"$3\"}]"
+  [ "$3" != none ] && reviews="[{\"author\":{\"login\":\"claude\"},\"state\":\"$3\",\"commit\":{\"oid\":\"${REVIEWED:-abc123}\"}}]"
   jq -n --arg state "$1" --argjson draft "$2" --argjson reviews "$reviews" --arg o "$4" --arg n "$5" \
         --argjson comments "${6:-[]}" --argjson checks "${7:-[]}" \
     '{state:$state,isDraft:$draft,headRefOid:"abc123",baseRefName:"main",reviews:$reviews,
@@ -35,7 +35,7 @@ pr_json() {
       headRepositoryOwner:{login:$o},headRepository:{name:$n}}' > "$STUB_DIR/pr.json"
 }
 gate() { # env assignments as args
-  env PR=7 GH_REPO=acme/site GH_TOKEN=x REPO_PRIVATE=true COMMENT_USER_TYPE=User \
+  env PR=7 GH_REPO=acme/site GH_TOKEN=x REPO_PRIVATE=true COMMENT_USER_TYPE=User WORKFLOW_NAME="PR Review" \
       COMMENT_USER_LOGIN=camile COMMENT_ASSOC=MEMBER "$@" \
       bash "$ROOT/scripts/respond-gate.sh" > "$STUB_DIR/stdout" 2>&1
   echo $?
@@ -62,12 +62,66 @@ rc=$(gate COMMENT_ASSOC=NONE)
 check "private repo, association NONE (private membership) -> still answers" "0/true" "$rc/$(out answer)"
 fresh; pr_json OPEN false CHANGES_REQUESTED acme site; touch "$STUB_DIR/checks-denied"
 rc=$(gate)
-check "checks:read denied -> falls back, build=unknown, answers (the 16-17 Sep silence bug)" \
-      "0/true/unknown/2" "$rc/$(out answer)/$(out build)/$(calls 'pr view')"
-fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' '[{"name":"build","conclusion":"SUCCESS"}]'
+check "checks:read denied -> falls back, build=unreadable, answers (the 16-17 Sep silence bug)" \
+      "0/true/unreadable/2" "$rc/$(out answer)/$(out build)/$(calls 'pr view')"
+# check runs exactly as `gh pr view --json statusCheckRollup` returned them on designbluemanila-web#89
+cr() { # name workflowName status conclusion startedAt
+  printf '{"__typename":"CheckRun","name":"%s","workflowName":"%s","status":"%s","conclusion":"%s","startedAt":"%s"}' "$@"; }
+ours_ok="$(cr 'pr-review / build' 'PR Review' COMPLETED SUCCESS 2026-09-22T03:51:36Z)"
+ours_bad="$(cr 'pr-review / build' 'PR Review' COMPLETED FAILURE 2026-09-22T03:51:36Z)"
+review_ok="$(cr 'pr-review / review' 'PR Review' COMPLETED SUCCESS 2026-09-22T03:53:28Z)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$ours_ok,$review_ok]"
 rc=$(gate)
-check "checks readable -> build result lower-cased to match the prompt" "0/true/success/CHANGES_REQUESTED" \
+check "the real check name 'pr-review / build' is found, lower-cased for the prompt (D12)" "0/true/success/CHANGES_REQUESTED" \
       "$rc/$(out answer)/$(out build)/$(out verdict)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$(cr build 'Other CI' COMPLETED SUCCESS 2026-09-22T03:50:00Z)]"
+gate >/dev/null
+check "another workflow's 'build' cannot stand in for ours (D03)" "unknown" "$(out build)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$ours_bad,$(cr build 'Other CI' COMPLETED SUCCESS 2026-09-22T03:59:00Z)]"
+gate >/dev/null
+check "a later success elsewhere does not mask our failed build (D04)" "failure" "$(out build)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$ours_bad,$(cr 'pr-review / build' 'PR Review' COMPLETED SUCCESS 2026-09-22T04:10:00Z)]"
+gate >/dev/null
+check "a re-run of our build: the newest attempt decides, not array order" "success" "$(out build)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$(cr 'pr-review / build' 'PR Review' COMPLETED SUCCESS 2026-09-22T04:10:00Z),$ours_bad]"
+gate >/dev/null
+check "... and the same the other way round" "success" "$(out build)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$ours_ok,$(cr 'ci / build' 'PR Review' COMPLETED FAILURE 2026-09-22T03:51:36Z)]"
+gate >/dev/null
+check "two different results started at the same moment -> unknown, never the nicer one" "unknown" "$(out build)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$(cr 'pr-review / build' 'PR Review' IN_PROGRESS '' 2026-09-22T03:51:36Z)]"
+gate >/dev/null
+check "a build still running is pending" "pending" "$(out build)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$ours_ok,$(cr 'pr-review / build' 'PR Review' QUEUED '' '')]"
+gate >/dev/null
+check "a re-run still QUEUED (no start time yet) is pending, not the old success" "pending" "$(out build)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$ours_ok]"
+gate WORKFLOW_NAME= >/dev/null
+check "no workflow name to match against -> unknown" "unknown" "$(out build)"
+
+# which commit the standing verdict is on, so the reply can say "that was an older commit"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$ours_ok]"
+gate >/dev/null
+check "the verdict's commit is reported" "abc123" "$(out reviewed_sha)"
+fresh; REVIEWED=0ldsha pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$ours_ok]"
+rc=$(gate)
+check "verdict on an OLDER commit -> still answers, and says which commit (D01)" "0/true/0ldsha" \
+      "$rc/$(out answer)/$(out reviewed_sha)"
+fresh; pr_json OPEN false CHANGES_REQUESTED acme site '[]' "[$(cr 'pr-review / build' 'PR Review' COMPLETED SKIPPED 2026-09-22T03:51:36Z)]"
+gate >/dev/null
+check "build skipped (a repo with nothing to build) reads as skipped" "skipped" "$(out build)"
+fresh; pr_json OPEN false DISMISSED acme site
+rc=$(gate)
+check "the bot's only verdict was withdrawn -> still answers, no false 'no review on record' (round 4 #2)" "0/true/DISMISSED/0" \
+      "$rc/$(out answer)/$(out verdict)/$(posted)"
+# a person dismissed the bot's latest CHANGES_REQUESTED; an older APPROVED is not "standing" again
+fresh; pr_json OPEN false none acme site
+jq '.reviews=[{author:{login:"claude"},state:"CHANGES_REQUESTED",commit:{oid:"abc123"}},{author:{login:"claude"},state:"DISMISSED",commit:{oid:"abc123"}}]' "$STUB_DIR/pr.json" > "$STUB_DIR/p2" && mv "$STUB_DIR/p2" "$STUB_DIR/pr.json"
+gate >/dev/null
+check "an earlier standing verdict is still the verdict when a later one was dismissed" "CHANGES_REQUESTED/abc123" "$(out verdict)/$(out reviewed_sha)"
+fresh; pr_json OPEN false DISMISSED acme site
+gate >/dev/null
+check "only dismissed verdicts -> no commit is claimed as reviewed (round 5 #2)" "DISMISSED/" "$(out verdict)/$(out reviewed_sha)"
 fresh; pr_json OPEN false APPROVED stranger site
 rc=$(gate)
 check "fork pull request -> no answer"           "0/false" "$rc/$(out answer)"
@@ -273,6 +327,84 @@ check "an absolute RESULTS_DIR still works" "1/yes" "$rc/$(grep -q 'lint failed'
 bproj 'api/composer.json={}' 'api/app/Broken.php=<?php invalid' 'web/package.json={}'
 rc=$(brun "api/app/Broken.php")
 check "a Laravel app in a sub-folder syntax-checks ITS changed files (the list path was relative)" "1/red" "$rc/$(overall)"
+
+echo "approval-guard.sh (review job)"
+guard() { # env assignments as args
+  env PR=7 REPO=acme/site GH_TOKEN=x EXPECT_SHA=abc123 SINCE=2026-09-23T10:00:00Z "$@" \
+      bash "$ROOT/scripts/approval-guard.sh" > "$STUB_DIR/stdout" 2>&1
+  echo $?
+}
+rv() { # login commit_id state submitted_at [id]
+  jq -cn --argjson id "${5:-1}" --arg l "$1" --arg c "$2" --arg st "$3" --arg t "$4" \
+    '{id:$id,user:{login:$l},commit_id:$c,state:$st,submitted_at:$t,body:"x"}'; }
+dismissed() { grep -c 'dismissals' "$STUB_LOG" || true; }
+fresh; echo "[$(rv 'claude[bot]' abc123 APPROVED 2026-09-23T10:05:00Z)]" > "$STUB_DIR/reviews.json"
+check "approval of the commit this run reviewed -> left alone" "0/0/0" "$(guard)/$(dismissed)/$(posted)"
+fresh; echo "[$(rv 'claude[bot]' newhead APPROVED 2026-09-23T10:05:00Z 42)]" > "$STUB_DIR/reviews.json"
+rc=$(guard)
+check "push during the review: approval landed on code nobody reviewed -> withdrawn + said" "0/1/1/1" \
+      "$rc/$(dismissed)/$(grep -c 'reviews/42/dismissals' "$STUB_LOG")/$(posted)"
+fresh; echo "[$(rv 'claude[bot]' 0ldsha APPROVED 2026-09-22T09:00:00Z)]" > "$STUB_DIR/reviews.json"
+check "an OLD approval from an earlier run is not this run's business" "0/0" "$(guard)/$(dismissed)"
+fresh; echo "[$(rv mark newhead APPROVED 2026-09-23T10:05:00Z)]" > "$STUB_DIR/reviews.json"
+check "a human's approval is never touched" "0/0" "$(guard)/$(dismissed)"
+fresh; echo "[$(rv 'claude[bot]' newhead CHANGES_REQUESTED 2026-09-23T10:05:00Z)]" > "$STUB_DIR/reviews.json"
+check "a changes-requested verdict is never withdrawn" "0/0" "$(guard)/$(dismissed)"
+fresh; echo "[$(rv 'claude[bot]' newhead APPROVED 2026-09-23T10:05:00Z)]" > "$STUB_DIR/reviews.json"; touch "$STUB_DIR/dismiss-fail"
+rc=$(guard)
+check "withdrawal refused by GitHub -> RED, and says so in the PR" "1/1" "$rc/$(posted)"
+fresh; touch "$STUB_DIR/api-fail"
+check "reviews unreadable -> RED (cannot prove no bad approval exists)" "1" "$(guard)"
+
+echo "respond-withdraw.sh (the reply cannot approve; it can pull an approval)"
+wd() { # env assignments as args
+  env PR=7 REPO=acme/site GH_TOKEN=x GATE_HEAD=abc123 SINCE=2026-09-23T10:00:00Z "$@" \
+      bash "$ROOT/scripts/respond-withdraw.sh" > "$STUB_DIR/stdout" 2>&1
+  echo $?
+}
+ic() { # login created_at body
+  jq -cn --arg l "$1" --arg t "$2" --arg b "$3" '{user:{login:$l},created_at:$t,body:$b,html_url:"https://example/c/1"}'; }
+PULL='<!-- pr-reviewer:verdict=request-changes -->'
+fresh; echo "[$(ic 'claude[bot]' 2026-09-23T10:05:00Z "🤖 **Automated reply.** missed a defect
+$PULL")]" > "$STUB_DIR/issue-comments.json"
+echo "[$(rv 'claude[bot]' abc123 APPROVED 2026-09-22T09:00:00Z 7),$(rv mark abc123 APPROVED 2026-09-22T09:00:00Z 8)]" > "$STUB_DIR/reviews.json"
+rc=$(wd)
+check "reply confirms a missed defect -> the bot's standing approval is pulled, a human's is not" "0/1/1/0" \
+      "$rc/$(dismissed)/$(grep -c 'reviews/7/dismissals' "$STUB_LOG")/$(grep -c 'reviews/8/dismissals' "$STUB_LOG")"
+fresh; echo "[$(ic 'claude[bot]' 2026-09-23T10:05:00Z "x
+$PULL")]" > "$STUB_DIR/issue-comments.json"
+echo "[$(rv 'claude[bot]' abc123 APPROVED 2026-09-22T09:00:00Z 7),$(rv 'claude[bot]' newhead APPROVED 2026-09-23T10:06:00Z 9)]" > "$STUB_DIR/reviews.json"
+rc=$(wd)
+check "a push that fixed it was approved meanwhile -> only the approval on the commit the reply read is pulled (round 4 #1)" \
+      "0/1/0" "$rc/$(grep -c 'reviews/7/dismissals' "$STUB_LOG")/$(grep -c 'reviews/9/dismissals' "$STUB_LOG")"
+fresh; echo "[$(ic 'claude[bot]' 2026-09-23T10:05:00Z "the marker is \`$PULL\` and it goes last
+so this line is the last one")]" > "$STUB_DIR/issue-comments.json"
+echo "[$(rv 'claude[bot]' abc123 APPROVED 2026-09-22T09:00:00Z)]" > "$STUB_DIR/reviews.json"
+check "the marker quoted mid-comment pulls nothing: it must be the last line (round 4 #4)" "0/0" "$(wd)/$(dismissed)"
+fresh; echo "[$(ic 'claude[bot]' 2026-09-23T10:05:00Z "x
+$PULL")]" > "$STUB_DIR/issue-comments.json"
+echo "[$(rv 'claude[bot]' 0ldsha APPROVED 2026-09-22T09:00:00Z 5)]" > "$STUB_DIR/reviews.json"
+check "the standing approval is on an OLDER commit (docs-only push since) -> still pulled" "0/1" \
+      "$(wd)/$(grep -c 'reviews/5/dismissals' "$STUB_LOG")"
+fresh; echo "[$(ic 'claude[bot]' 2026-09-23T10:05:00Z "findings stand")]" > "$STUB_DIR/issue-comments.json"
+echo "[$(rv 'claude[bot]' abc123 APPROVED 2026-09-22T09:00:00Z)]" > "$STUB_DIR/reviews.json"
+check "no marker -> nothing pulled" "0/0" "$(wd)/$(dismissed)"
+fresh; echo "[$(ic camile 2026-09-23T10:05:00Z "please
+$PULL")]" > "$STUB_DIR/issue-comments.json"
+echo "[$(rv 'claude[bot]' abc123 APPROVED 2026-09-22T09:00:00Z)]" > "$STUB_DIR/reviews.json"
+check "the marker in a PERSON's comment is ignored" "0/0" "$(wd)/$(dismissed)"
+fresh; echo "[$(ic 'claude[bot]' 2026-09-22T09:00:00Z "old
+$PULL")]" > "$STUB_DIR/issue-comments.json"
+echo "[$(rv 'claude[bot]' abc123 APPROVED 2026-09-22T09:00:00Z)]" > "$STUB_DIR/reviews.json"
+check "a marker from an earlier reply is ignored" "0/0" "$(wd)/$(dismissed)"
+fresh; echo "[$(ic 'claude[bot]' 2026-09-23T10:05:00Z "x
+$PULL")]" > "$STUB_DIR/issue-comments.json"
+echo "[$(rv 'claude[bot]' abc123 APPROVED 2026-09-22T09:00:00Z)]" > "$STUB_DIR/reviews.json"; touch "$STUB_DIR/dismiss-fail"
+check "GitHub refuses -> RED (the approval still stands)" "1" "$(wd)"
+fresh; touch "$STUB_DIR/api-fail"
+check "comments unreadable -> RED" "1" "$(wd)"
+fresh; echo "[$(ic 'claude[bot]' 2026-09-23T10:05:00Z "   ")]" > "$STUB_DIR/issue-comments.json"
+check "a blank bot comment does not break the check (round 5 #3)" "0/0" "$(wd)/$(dismissed)"
 
 echo "check-caller-contract.py (each mutation must be caught)"
 contract() { # perl substitution for review.yml, perl substitution for the template ('' = leave alone)

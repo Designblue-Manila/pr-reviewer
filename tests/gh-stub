@@ -5,6 +5,7 @@
 #                        that does not grant `checks: read`
 #   reviews.json         REST pulls/N/reviews          issue-comments.json   REST issues/N/comments
 #   api-fail             (flag) every `gh api` call exits 1 and prints nothing
+#   dismiss-fail         (flag) withdrawing a review (…/dismissals) is refused
 #   pages                (number) pretend --paginate returned this many pages: the --jq
 #                        filter runs once per page, the fixture on the first, [] on the rest
 # `--jq` filters are run through the real jq, so the filter text itself is under test.
@@ -31,6 +32,9 @@ case "${1:-} ${2:-}" in
     [ -f "$STUB_DIR/api-fail" ] && exit 1
     filter="$(arg_after --jq "$@")"
     case "$2" in
+      */dismissals)                      # PUT: withdraw a review; `dismiss-fail` (flag) refuses it
+        [ -f "$STUB_DIR/dismiss-fail" ] && { echo "HTTP 403" >&2; exit 1; }
+        echo '{}'; exit 0 ;;
       */reviews)  f="$STUB_DIR/reviews.json" ;;
       */comments) f="$STUB_DIR/issue-comments.json" ;;
       *) echo "gh-stub: unexpected api path $2" >&2; exit 97 ;;
