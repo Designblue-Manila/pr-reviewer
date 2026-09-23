@@ -460,7 +460,10 @@ build_php() {
 
       # tests
       if ls tests/**/*Test.php tests/*Test.php >/dev/null 2>&1 || find tests -name '*Test.php' 2>/dev/null | grep -q .; then
-        if [ -f artisan ]; then run_timed php artisan test --no-ansi >"$out/test.log" 2>&1 && tests=passed || tests=failed
+        # no --no-ansi: on some versions `artisan test` hands it to PHPUnit 9.6, which dies with
+        # 'Unknown option "--no-ansi"' before running a test (issue #16, suntrust-api). The
+        # colour codes are stripped below anyway.
+        if [ -f artisan ]; then run_timed php artisan test >"$out/test.log" 2>&1 && tests=passed || tests=failed
         elif [ -x vendor/bin/phpunit ]; then run_timed vendor/bin/phpunit >"$out/test.log" 2>&1 && tests=passed || tests=failed
         fi
         # A "Tests:" summary line means the suite RAN. That decides the verdict —

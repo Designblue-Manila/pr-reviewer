@@ -209,7 +209,9 @@ bproj() {
   printf '%s\n' '#!/bin/sh' 'printf "%s %s\n" "$(pwd)" "$*" >> "$COMMAND_LOG"' \
     'if [ "$1" = "-r" ]; then printf "8.3.0"; exit 0; fi' \
     'if [ "$1" = "-l" ]; then grep -q invalid "$2" && exit 255; exit 0; fi' \
-    'if [ "$2" = "migrate" ] && [ "${MIGRATE_FAIL:-0}" = 1 ]; then echo "SQLSTATE: no such table"; exit 1; fi' 'exit 0' > "$BP/bin/php"
+    'if [ "$2" = "migrate" ] && [ "${MIGRATE_FAIL:-0}" = 1 ]; then echo "SQLSTATE: no such table"; exit 1; fi' \
+    'if [ "$2" = "test" ]; then case "$*" in *--no-ansi*) echo "Unknown option \"--no-ansi\""; exit 2;; esac; printf "\033[32m  Tests:    3 passed (9 assertions)\033[0m\n"; exit 0; fi' \
+    'exit 0' > "$BP/bin/php"
   chmod +x "$BP/bin/"*
 }
 # brun <changed-files: a list, "-" for an empty list, "none" for no list at all> [env...]
@@ -238,6 +240,10 @@ bproj "package.json=$(pkg '{"lint":"eslint .","build":"nuxt build"}')"
 rc=$(brun "pages/index.vue")
 check "node: lint and build pass -> green (D06)" "0/green" "$rc/$(overall)"
 
+bproj "${laravel[@]}" 'tests/Feature/ExampleTest.php=<?php'
+rc=$(brun "app/Models/User.php")
+check "laravel: artisan test runs WITHOUT --no-ansi (PHPUnit 9.6 rejects it, #16) -> tests=passed:3" \
+      "0/green/yes/0" "$rc/$(overall)/$(has 'tests=passed:3')/$(ran 'test --no-ansi')"
 bproj "${laravel[@]}"
 rc=$(brun "config/database.php" MIGRATE_FAIL=1)
 check "laravel: config change breaks an unchanged migration -> red, never 'already failed before this PR' (D07)" \
