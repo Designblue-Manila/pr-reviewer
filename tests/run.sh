@@ -142,6 +142,138 @@ check "announcement for an OLDER commit does not silence this one" "1/1" "$(verd
 fresh; verdict >/dev/null; first="$(head -c 4 "$STUB_DIR/posted.1")"
 check "comment body starts at column 0 (indented = rendered as code)" "<!--" "$first"
 
+echo "build.sh (npm, php and composer are stubs; nothing is installed or run for real)"
+# bproj <file>=<content> ...   -> a fresh project folder with those files, stubs on PATH
+bproj() {
+  BP="$(mktemp -d)"; mkdir -p "$BP/bin"; : > "$BP/commands.txt"
+  local kv f; for kv in "$@"; do f="${kv%%=*}"; mkdir -p "$BP/$(dirname "$f")"; printf '%s' "${kv#*=}" > "$BP/$f"; done
+  # npm: `run lint` fails in a folder holding .lint-fail
+  printf '%s\n' '#!/bin/sh' 'printf "%s %s\n" "$(pwd)" "$*" >> "$COMMAND_LOG"' \
+    'if [ "$1 $2" = "run lint" ] && [ -f .lint-fail ]; then exit 1; fi' 'exit 0' > "$BP/bin/npm"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$BP/bin/composer"
+  # php: -l fails on a file containing "invalid"; `artisan migrate` fails when MIGRATE_FAIL=1
+  printf '%s\n' '#!/bin/sh' 'printf "%s %s\n" "$(pwd)" "$*" >> "$COMMAND_LOG"' \
+    'if [ "$1" = "-r" ]; then printf "8.3.0"; exit 0; fi' \
+    'if [ "$1" = "-l" ]; then grep -q invalid "$2" && exit 255; exit 0; fi' \
+    'if [ "$2" = "migrate" ] && [ "${MIGRATE_FAIL:-0}" = 1 ]; then echo "SQLSTATE: no such table"; exit 1; fi' 'exit 0' > "$BP/bin/php"
+  chmod +x "$BP/bin/"*
+}
+# brun <changed-files: a list, "-" for an empty list, "none" for no list at all> [env...]
+brun() {
+  local changed="$1"; shift
+  case "$changed" in none) ;; -) : > "$BP/changed.txt" ;; *) printf '%s\n' $changed > "$BP/changed.txt" ;; esac
+  (cd "$BP" && env -u BASE_SHA PATH="$BP/bin:$PATH" SKIP_MYSQL=1 STEP_TIMEOUT=5 COMMAND_LOG="$BP/commands.txt" \
+     CHANGED_FILES_FILE="$BP/changed.txt" "$@" bash "$ROOT/scripts/build.sh" run >/dev/null 2>&1)
+  echo $?
+}
+summary() { cat "$BP/.build-results/summary.txt"; }
+overall() { grep -oE '^overall=[a-z]+' "$BP/.build-results/summary.txt" | cut -d= -f2; }
+has()     { grep -qE "$1" "$BP/.build-results/summary.txt" && echo yes || echo no; }
+ran()     { grep -cE "$1" "$BP/commands.txt" || true; }
+
+pkg() { jq -cn --argjson s "${1:-{\}}" '{name:"fixture",private:true,scripts:$s}'; }
+pkgws() { jq -cn --argjson s "${1:-{\}}" '{name:"fixture",private:true,workspaces:["apps/*"],scripts:$s}'; }
+laravel=( 'composer.json={"require":{"php":"^8.3"}}' 'artisan=<?php' '.env=APP_KEY=base64:fixture'
+          'phpunit.xml=<phpunit><php><env name="DB_CONNECTION" value="sqlite"/></php></phpunit>'
+          'database/migrations/001_create.php=<?php' 'config/database.php=<?php' )
+
+bproj "package.json=$(pkg '{"lint":"eslint .","build":"nuxt build"}')" '.lint-fail=x'
+rc=$(brun "pages/index.vue")
+check "node: a failing lint script turns the build red (D05)" "1/red/yes" "$rc/$(overall)/$(has 'reasons=.*lint failed')"
+bproj "package.json=$(pkg '{"lint":"eslint .","build":"nuxt build"}')"
+rc=$(brun "pages/index.vue")
+check "node: lint and build pass -> green (D06)" "0/green" "$rc/$(overall)"
+
+bproj "${laravel[@]}"
+rc=$(brun "config/database.php" MIGRATE_FAIL=1)
+check "laravel: config change breaks an unchanged migration -> red, never 'already failed before this PR' (D07)" \
+      "1/red/yes/no" "$rc/$(overall)/$(has 'migrate_scope=unconfirmed')/$(has 'before this PR')"
+bproj "${laravel[@]}"
+rc=$(brun "database/migrations/001_create.php" MIGRATE_FAIL=1)
+check "laravel: the PR's own migration fails -> red, attributed to the PR (D08)" "1/red/yes" "$rc/$(overall)/$(has 'migrate_scope=pr')"
+bproj "${laravel[@]}"
+rc=$(brun none MIGRATE_FAIL=1)
+check "laravel: no file list and a migration fails -> red" "1/red" "$rc/$(overall)"
+bproj "${laravel[@]}" 'app/Broken.php=<?php invalid'
+rc=$(brun none)
+check "laravel: no file list -> every PHP file is syntax-checked, and it says so" "1/red/yes" \
+      "$rc/$(overall)/$(has '^changed_files=unavailable')"
+bproj "${laravel[@]}" 'app/Broken.php=<?php invalid' 'vendor/pkg/Old.php=<?php invalid'
+rc=$(brun "config/database.php")
+check "laravel: with a file list, only the changed files are syntax-checked" "0/green/1" "$rc/$(overall)/$(ran ' -l ')"
+
+bproj 'wp-config.php=<?php' 'wp-content/plugins/x/plugin.php=<?php invalid'
+rc=$(brun none)
+check "wordpress: no file list -> checks every PHP file instead of none (D09)" "1/red/yes/no" \
+      "$rc/$(overall)/$(has '^changed_files=unavailable')/$(has 'files_checked=0')"
+bproj 'wp-config.php=<?php' 'wp-content/plugins/x/plugin.php=<?php invalid'
+rc=$(brun "-")
+check "wordpress: an EMPTY list is a real empty diff -> nothing to check, green" "0/green/yes" "$rc/$(overall)/$(has 'files_checked=0')"
+bproj 'wp-config.php=<?php' 'wp-content/plugins/x/plugin.php=<?php invalid'
+rc=$(brun "wp-content/plugins/x/plugin.php")
+check "wordpress: syntax error in a changed file -> red (D10)" "1/red" "$rc/$(overall)"
+
+bproj "package.json=$(pkg '{"prepare":"husky"}')" "apps/web/package.json=$(pkg '{"lint":"eslint ."}')" 'apps/web/.lint-fail=x'
+rc=$(brun "apps/web/page.js")
+check "monorepo: a tooling-only root no longer hides a changed child app (D11)" "1/yes/yes" \
+      "$rc/$(has '^project=apps/web toolchain=node .*lint=fail')/$(has 'apps/web: lint failed')"
+bproj "package.json=$(pkgws '{"build":"turbo run build","lint":"turbo run lint"}')" "apps/web/package.json=$(pkg '{"build":"nuxt build"}')"
+rc=$(brun "apps/web/page.js")
+check "monorepo: a workspace root that builds its members -> members not built twice" "0/yes/0" \
+      "$rc/$(has '^project=apps/web .*build=covered-by-root')/$(ran "apps/web run build")"
+bproj "package.json=$(pkg '{}')" "apps/web/package.json=$(pkg '{"build":"x"}')" "apps/api/package.json=$(pkg '{"build":"x"}')"
+rc=$(brun "apps/web/page.js")
+check "monorepo: an untouched child is still skipped" "0/yes" "$rc/$(has '^project=apps/api .*reason=no-changed-files')"
+bproj "package.json=$(pkg '{}')" "apps/web/package.json=$(pkg '{"build":"x"}')" "apps/api/package.json=$(pkg '{"build":"x"}')"
+rc=$(brun "package-lock.json")
+check "monorepo: a shared root lockfile change rebuilds every child" "0/no/1" \
+      "$rc/$(has 'reason=no-changed-files')/$(ran "apps/api run build")"
+bproj "package.json=$(pkg '{"build":"nuxt build"}')" "playground/package.json=$(pkg '{"build":"x"}')"
+rc=$(brun "playground/app.vue")
+check "an ordinary app root with its own build is unchanged: nested folders are not new projects" "0/no" \
+      "$rc/$(has '^project=playground')"
+bproj "package.json=$(pkgws '{"build":"turbo run build"}')" "apps/web/package.json=$(pkg '{"build":"x"}')" "docs/package.json=$(pkg '{"lint":"x"}')" 'docs/.lint-fail=x'
+rc=$(brun "docs/index.md")
+check "monorepo: a folder OUTSIDE the workspace globs is built on its own, not called covered" "1/no/yes" \
+      "$rc/$(has '^project=docs .*covered-by-root')/$(has 'docs: lint failed')"
+bproj "package.json=$(pkgws '{"test":"vitest"}')" "apps/web/package.json=$(pkg '{"lint":"x"}')" 'apps/web/.lint-fail=x'
+rc=$(brun "apps/web/page.js")
+check "monorepo: a root that only TESTS does not cover its members' lint and build" "1/no" \
+      "$rc/$(has 'covered-by-root')"
+bproj "package.json=$(pkg '{}')" "web/package.json=$(pkg '{"build":"x"}')" 'web/.nvmrc=18'
+check "detect: a root that builds nothing does not pick the apps' Node version" "node_version=18" \
+      "$(cd "$BP" && bash "$ROOT/scripts/build.sh" detect 2>/dev/null | grep '^node_version=')"
+bproj 'package.json={"workspaces":["apps/*","!apps/legacy"],"scripts":{"build":"turbo run build"}}' \
+      "apps/web/package.json=$(pkg '{"build":"x"}')" "apps/web/e2e/package.json=$(pkg '{"lint":"x"}')" 'apps/web/e2e/.lint-fail=x' \
+      "apps/legacy/package.json=$(pkg '{"lint":"x"}')" 'apps/legacy/.lint-fail=x'
+rc=$(brun "apps/web/e2e/a.js apps/legacy/a.js")
+check "monorepo: 'apps/*' is ONE folder level, and '!apps/legacy' is not a member" "1/yes/no/no" \
+      "$rc/$(has '^project=apps/web .*covered-by-root')/$(has '^project=apps/web/e2e .*covered-by-root')/$(has '^project=apps/legacy .*covered-by-root')"
+bproj 'package.json={"workspaces":[".tools/*"],"scripts":{"build":"x"}}' "tools/x/package.json=$(pkg '{"lint":"x"}')" 'tools/x/.lint-fail=x'
+rc=$(brun "tools/x/a.js")
+check "monorepo: '.tools/*' is not 'tools/*'" "1/no" "$rc/$(has 'covered-by-root')"
+bproj 'package.json={"scripts":{"build":"x"}}' 'pnpm-workspace.yaml=packages:
+  - "apps/*"
+onlyBuiltDependencies:
+  - "lib/*"' "lib/x/package.json=$(pkg '{"lint":"x"}')" 'lib/x/.lint-fail=x'
+rc=$(brun "lib/x/a.js")
+check "monorepo: only the pnpm 'packages:' list names members" "1/no" "$rc/$(has 'covered-by-root')"
+
+bproj 'package.json={"scripts":{"dev":"gulp"}}' '.nvmrc=16' 'wp-config.php=<?php' "wp-content/themes/t/package.json=$(pkg '{}')"
+check "detect: a WordPress root keeps its own pinned Node version" "node_version=16" \
+      "$(cd "$BP" && bash "$ROOT/scripts/build.sh" detect 2>/dev/null | grep '^node_version=')"
+bproj "package.json=$(pkg '{}')" '.nvmrc=16' 'api/composer.json={}'
+check "detect: a tooling root whose only child is PHP keeps its own Node version" "node_version=16" \
+      "$(cd "$BP" && bash "$ROOT/scripts/build.sh" detect 2>/dev/null | grep '^node_version=')"
+
+bproj "package.json=$(pkg '{"lint":"x","build":"x"}')" '.lint-fail=x'
+rc=$(brun "a.js" RESULTS_DIR="$BP/abs-results")
+check "an absolute RESULTS_DIR still works" "1/yes" "$rc/$(grep -q 'lint failed' "$BP/abs-results/summary.txt" && echo yes || echo no)"
+
+bproj 'api/composer.json={}' 'api/app/Broken.php=<?php invalid' 'web/package.json={}'
+rc=$(brun "api/app/Broken.php")
+check "a Laravel app in a sub-folder syntax-checks ITS changed files (the list path was relative)" "1/red" "$rc/$(overall)"
+
 echo "check-caller-contract.py (each mutation must be caught)"
 contract() { # perl substitution for review.yml, perl substitution for the template ('' = leave alone)
   local d; d="$(mktemp -d)"; mkdir -p "$d/tests"
@@ -163,7 +295,7 @@ check "template pinned to @main -> caught"        1 "$(contract '' 's/review\.ym
 check "an if: put back in the template -> caught" 1 "$(contract '' 's/^  pr-review:$/  pr-review:\n    if: github.actor != 0/m')"
 check "template grants less than the field (issues: none) -> caught" 1 "$(contract '' 's/^      issues: read$/      issues: none/m')"
 check "permissions: write-all on a job (invisible to the checker until 21 Sep) -> caught" 1 "$(contract 's/^    permissions:\n      # MUST stay within.*?id-token: write\n/    permissions: write-all\n/ms' '')"
-check "a job's permissions block deleted -> caught" 1 "$(contract 's/^    permissions:\n      contents: read\n    outputs:/    outputs:/m' '')"
+check "a job's permissions block deleted -> caught" 1 "$(contract 's/^    permissions:\n      contents: read\n(?:      #[^\n]*\n)*      pull-requests: read\n    outputs:/    outputs:/m' '')"
 golden_too() { # widen a gate AND regenerate the golden, as an author told "regenerate it" would
   local d; d="$(mktemp -d)"; mkdir -p "$d/tests"
   perl -0pe "$1" "$ROOT/.github/workflows/review.yml" > "$d/review.yml"

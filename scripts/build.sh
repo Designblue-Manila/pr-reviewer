@@ -85,17 +85,89 @@ PY
 
 # --------------------------------------------------------- project discovery ---
 
-# Emits "<dir>\t<kind>" lines. kind = php | node | wp
+# Emits "<dir>\t<kind>" lines. kind = php | node | wp | node-covered
 # Root wins; otherwise every dir up to 3 deep holding composer.json or package.json.
 # A dir with composer.json is php (its package.json is Vite assets, not a second project).
+#
+# A root package.json wins outright only when it is an app that builds itself. A root that
+# declares workspaces, or builds and tests nothing (husky, prettier), sits ABOVE the apps:
+# returning it alone left a changed child app unbuilt while the check said green. Its
+# nested projects are listed too — as `node-covered` when the root has a workspace
+# build/test that runs them (so they are not built twice), as projects of their own when not.
 discover() {
   if [ -f composer.json ]; then echo -e ".\tphp"; return; fi
-  if [ -f package.json ]; then echo -e ".\tnode"; return; fi
+  if [ -f package.json ]; then
+    echo -e ".\tnode"
+    local ws=false scripts=false
+    { [ -n "$(json_get package.json workspaces)" ] || [ -f pnpm-workspace.yaml ]; } && ws=true
+    { [ -n "$(json_get package.json scripts.build)" ] || [ -n "$(json_get package.json scripts.test)" ]; } && scripts=true
+    [ "$ws" = false ] && [ "$scripts" = true ] && return
+    # WordPress with a CSS-tooling package.json: its plugins' composer.json files are not
+    # projects of ours. Unchanged from before (still built as node only — a known gap).
+    { [ -d wp-content ] || ls wp-config*.php >/dev/null 2>&1; } && return
+    local builds=false dir kind globs
+    [ -n "$(json_get package.json scripts.build)" ] && builds=true
+    globs="$(workspace_globs)"
+    nested | while IFS=$'\t' read -r dir kind; do
+      [ "$kind" = node ] && [ "$builds" = true ] && is_member "$dir" "$globs" && kind=node-covered
+      printf '%s\t%s\n' "$dir" "$kind"
+    done
+    return
+  fi
   if [ -d wp-content ] || ls wp-config*.php >/dev/null 2>&1; then echo -e ".\twp"; return; fi
-  find . -mindepth 2 -maxdepth 4 \
+  nested
+}
+
+# The root's workspace members, from package.json (array or {packages: [...]}) or
+# pnpm-workspace.yaml, as one anchored regex per line: "+re" includes, "-re" excludes
+# (a "!apps/legacy" glob). `*` is ONE folder level, `**` any depth — as npm, yarn and pnpm
+# read them. Only a member is built by the root's own build script.
+# (kept as a variable, like PHP_LOCK_MIN_PY, because bash 3.2 mis-parses a heredoc in $(...))
+read -r -d '' WORKSPACE_GLOBS_PY <<'PY' || true
+import json,re
+def out(g):
+    g=g.strip().rstrip("/"); neg=g.startswith("!"); g=g[1:] if neg else g
+    while g.startswith("./"): g=g[2:]
+    if not g or g.startswith("../"): return
+    r=""; i=0
+    while i<len(g):
+        if g.startswith("**/",i): r+="(.*/)?"; i+=3
+        elif g.startswith("**",i): r+=".*"; i+=2
+        elif g[i]=="*": r+="[^/]*"; i+=1
+        elif g[i]=="?": r+="[^/]"; i+=1
+        else: r+=re.escape(g[i]); i+=1
+    print(("-" if neg else "+")+"^"+r+"$")
+try:
+    w=json.load(open("package.json")).get("workspaces") or []
+    if isinstance(w,dict): w=w.get("packages") or []
+    for g in w: out(g)
+except Exception: pass
+try:
+    inside=False
+    for line in open("pnpm-workspace.yaml"):
+        if re.match(r"\S", line): inside=line.startswith("packages:")
+        m=re.match(r"\s+-\s*['\"]?([^'\"#\s]+)", line)
+        if inside and m: out(m.group(1))
+except Exception: pass
+PY
+workspace_globs() { python3 -c "$WORKSPACE_GLOBS_PY" 2>/dev/null; }
+is_member() {  # dir, the lines workspace_globs printed -> member when an include matches and no exclude does
+  local dir="$1" line hit=1 re
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    re="${line#?}"
+    [[ "$dir" =~ $re ]] || continue
+    case "$line" in -*) return 1 ;; +*) hit=0 ;; esac
+  done <<< "$2"
+  return $hit
+}
+
+# (no -mindepth: under it find never tests, so never prunes, a top-level node_modules)
+nested() {
+  find . -maxdepth 4 \
        \( -name node_modules -o -name vendor -o -name .git -o -name dist -o -name .output -o -name .nuxt -o -name storage -o -name public \) -prune -o \
        \( -name composer.json -o -name package.json \) -print 2>/dev/null \
-    | sed 's#^\./##' | sort \
+    | sed 's#^\./##' | grep / | sort \
     | awk -F/ '{ dir=$0; sub(/\/[^\/]*$/,"",dir); file=$NF;
                  if (file=="composer.json") { kind[dir]="php" }
                  else if (!(dir in kind)) { kind[dir]="node" } }
@@ -142,18 +214,27 @@ detect_pm() {
 }
 
 cmd_detect() {
-  local has_node=false has_php=false node_version="" php_version="" projects=""
+  local has_node=false has_php=false node_version="" php_version="" projects="" found
+  found="$(discover)"
   while IFS=$'\t' read -r dir kind; do
     [ -z "$dir" ] && continue
+    [ "$kind" = node-covered ] && continue
     projects="${projects}${dir}:${kind} "
     case "$kind" in
-      node) has_node=true; [ -z "$node_version" ] && node_version="$(detect_node_version "$dir")" ;;
+      node) has_node=true
+            # a tooling-only root (husky, prettier) above real Node apps is not the one whose
+            # Node matters; with no other Node app listed (WordPress, a PHP child) it is
+            if [ -z "$node_version" ] && ! { [ "$dir" = . ] && [ -z "$(json_get package.json scripts.build)" ] \
+                 && [ -z "$(json_get package.json scripts.test)" ] \
+                 && printf '%s\n' "$found" | grep -qE $'^[^.][^\t]*\tnode$'; }; then
+              node_version="$(detect_node_version "$dir")"
+            fi ;;
       php)  has_php=true;  [ -z "$php_version" ]  && php_version="$(detect_php_version "$dir")"
             # Laravel repos ship a package.json too; only set up Node if it is really used in CI
             ;;
       wp)   has_php=true;  [ -z "$php_version" ]  && php_version="$PHP_DEFAULT" ;;
     esac
-  done < <(discover)
+  done <<< "$found"
   echo "has_node=$has_node"
   echo "has_php=$has_php"
   echo "node_version=${node_version:-$NODE_DEFAULT}"
@@ -164,6 +245,7 @@ cmd_detect() {
 # --------------------------------------------------------------- run mode ---
 
 CHANGED_FILE=""
+CHANGED_STATUS=unavailable   # ok = the PR's file list is known (an empty list is a real empty diff)
 SUMMARY=""
 RED_REASONS=""
 
@@ -171,6 +253,20 @@ changed_files_for() {  # dir -> prints changed paths under dir (relative to repo
   local dir="$1"
   [ -z "$CHANGED_FILE" ] && return 0
   if [ "$dir" = "." ]; then cat "$CHANGED_FILE"; else grep -E "^${dir}/" "$CHANGED_FILE" || true; fi
+}
+
+# PHP files to syntax-check in the current folder: the PR's changed ones, or — when the
+# file list could not be read — every tracked PHP file outside vendor/node_modules.
+# Checking none and calling it `lint=ok` is how WordPress PRs went green unread.
+php_files_to_lint() {  # dir (as the repo root sees it)
+  local dir="$1"
+  if [ "$CHANGED_STATUS" = ok ]; then
+    changed_files_for "$dir" | grep -E '\.php$' | while IFS= read -r f; do printf '%s\n' "${f#"$dir"/}"; done
+  elif git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files -- '*.php' | grep -vE '(^|/)(vendor|node_modules)/' || true
+  else
+    find . \( -name vendor -o -name node_modules -o -name .git \) -prune -o -name '*.php' -print | sed 's#^\./##'
+  fi
 }
 
 slug() { printf '%s' "$1" | sed 's#^\.$#root#; s#[/ ]#-#g'; }
@@ -277,6 +373,8 @@ build_node() {
   [ -f "$out/notes.txt" ] && line="$line $(tr '\n' ' ' < "$out/notes.txt" | sed 's/ $//')"
   record "$line"
   [ "${install:-fail}" = fail ] && red "$dir: install failed"
+  # the repo's own lint script, not a rule of ours: PHP syntax errors were already red
+  [ "${lint:-none}" = fail ] && red "$dir: lint failed"
   [ "${build:-none}" = fail ] && red "$dir: build failed"
   [ "${tests:-none}" = failed ] && red "$dir: tests failed"
   return 0
@@ -289,8 +387,8 @@ build_php() {
     install=ok boot=none migrate=none tests=none db=none lint=ok
 
     # php -l on the changed PHP files (syntax errors before anything else)
-    for f in $(changed_files_for "$dir" | grep -E '\.php$' || true); do
-      rel="${f#"$dir"/}"; [ -f "$rel" ] || continue
+    for rel in $(php_files_to_lint "$dir"); do
+      [ -f "$rel" ] || continue
       php -l "$rel" >>"$out/lint.log" 2>&1 || lint=fail
     done
 
@@ -394,29 +492,32 @@ build_php() {
   install="$(status_of "$out" install)"; lint="$(status_of "$out" lint)"; boot="$(status_of "$out" boot)"
   migrate="$(status_of "$out" migrate)"; tests="$(status_of "$out" tests)"; db="$(status_of "$out" db)"
   env_errors="$(status_of "$out" env_errors)"
+  # A failed migration is ALWAYS red. `migrate_scope=pr` = the PR changed a migration;
+  # `unconfirmed` = it did not, but nobody has run the base branch to prove the failure is
+  # older: a config, provider, model or dependency change breaks an untouched migration
+  # just as well. This used to print "already fail before this PR" on no evidence.
+  mscope=""
+  if [ "${migrate:-none}" = fail ]; then
+    mscope=unconfirmed
+    [ "$CHANGED_STATUS" = ok ] && changed_files_for "$dir" | grep -q "database/migrations/" && mscope=pr
+  fi
   line="project=$dir toolchain=php php=$phpv install=${install:-fail} lint=${lint:-ok} boot=${boot:-none} migrate=${migrate:-none} tests=${tests:-none} db=${db:-none}"
+  [ -n "$mscope" ] && line="$line migrate_scope=$mscope"
   # the count is a hint for the reviewer, not a downgrade: the run is still failed and still red
   [ "${env_errors:-0}" != 0 ] && line="$line env_errors=$env_errors"
   record "$line"
   [ "${install:-fail}" = fail ] && red "$dir: composer install failed"
   [ "${lint:-ok}" = fail ] && red "$dir: PHP syntax error"
   [ "${boot:-none}" = fail ] && red "$dir: application failed to boot"
-  # a migration failure is this PR's fault only if the PR touched the migrations; otherwise it is repo debt
-  if [ "${migrate:-none}" = fail ]; then
-    if [ -z "$CHANGED_FILE" ] || changed_files_for "$dir" | grep -q "database/migrations/"; then
-      red "$dir: migrations failed on a fresh database"
-    else
-      record "note=$dir: migrations already fail on a fresh database before this PR (no migration changed here)"
-    fi
-  fi
+  [ -n "$mscope" ] && red "$dir: migrations failed on a fresh database"
   case "${tests:-none}" in failed*) red "$dir: tests failed" ;; esac
   return 0
 }
 
 build_wp() {
-  local dir="$1" out="$2" lint=ok n=0 f rel
-  for f in $(changed_files_for "$dir" | grep -E '\.php$' || true); do
-    rel="${f#"$dir"/}"; [ -f "$rel" ] || continue
+  local dir="$1" out="$2" lint=ok n=0 rel
+  for rel in $(php_files_to_lint "$dir"); do
+    [ -f "$rel" ] || continue
     n=$((n+1)); php -l "$rel" >>"$out/lint.log" 2>&1 || lint=fail
   done
   record "project=$dir toolchain=wp lint=$lint files_checked=$n build=none tests=none"
@@ -426,34 +527,48 @@ build_wp() {
 
 cmd_run() {
   rm -rf "$RESULTS_DIR"; mkdir -p "$RESULTS_DIR"
-  local found=0 dir kind out
+  local found=0 dir kind out res
+  case "$RESULTS_DIR" in /*) res="$RESULTS_DIR" ;; *) res="$ROOT/$RESULTS_DIR" ;; esac
 
   # Changed files: the workflow supplies a list (CHANGED_FILES_FILE, from the PR API);
-  # locally, BASE_SHA works when the base commit is reachable.
-  if [ -n "${CHANGED_FILES_FILE:-}" ] && [ -s "$CHANGED_FILES_FILE" ]; then
-    CHANGED_FILE="$RESULTS_DIR/changed-files.txt"
-    cp "$CHANGED_FILES_FILE" "$CHANGED_FILE"
+  # locally, BASE_SHA works when the base commit is reachable. A list that exists but is
+  # empty is a real empty diff. NO list (the API call failed) is `changed_files=unavailable`:
+  # every PHP file is then syntax-checked and no sub-project is skipped. Until 23 Sep 2026
+  # the build job lacked `pull-requests: read`, the call failed with a 403 on every PR, and
+  # an empty list was read as "nothing changed".
+  # Absolute path: build_php and php_files_to_lint read it from inside a sub-project.
+  if [ -n "${CHANGED_FILES_FILE:-}" ] && [ -f "$CHANGED_FILES_FILE" ]; then
+    CHANGED_FILE="$res/changed-files.txt"
+    if cp "$CHANGED_FILES_FILE" "$CHANGED_FILE"; then CHANGED_STATUS=ok; else CHANGED_FILE=""; fi
   elif [ -n "${BASE_SHA:-}" ]; then
     git fetch -q --depth=1 origin "$BASE_SHA" 2>/dev/null || true
     if git cat-file -e "$BASE_SHA" 2>/dev/null; then
-      CHANGED_FILE="$RESULTS_DIR/changed-files.txt"
-      git diff --name-only "$BASE_SHA" HEAD > "$CHANGED_FILE" 2>/dev/null || CHANGED_FILE=""
+      CHANGED_FILE="$res/changed-files.txt"
+      if git diff --name-only "$BASE_SHA" HEAD > "$CHANGED_FILE" 2>/dev/null; then CHANGED_STATUS=ok; else CHANGED_FILE=""; fi
     fi
   fi
+  [ "$CHANGED_STATUS" = ok ] || record "changed_files=unavailable (could not read the PR's file list: every PHP file is syntax-checked, no sub-project is skipped)"
+
+  # A root manifest, lockfile or workspace config is shared by every sub-project: when the
+  # PR changes one, no sub-project counts as untouched.
+  local shared_changed=false
+  [ "$CHANGED_STATUS" = ok ] && grep -qE '^(package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|\.npmrc|\.nvmrc|\.node-version|tsconfig[^/]*\.json|turbo\.json|nx\.json|composer\.(json|lock))$' "$CHANGED_FILE" \
+    && shared_changed=true
 
   while IFS=$'\t' read -r dir kind; do
     [ -z "$dir" ] && continue
     found=$((found+1))
-    out="$ROOT/$RESULTS_DIR/$(slug "$dir")"; mkdir -p "$out"
+    out="$res/$(slug "$dir")"; mkdir -p "$out"
     # a sub-project the PR did not touch is not rebuilt
-    if [ "$dir" != "." ] && [ -n "$CHANGED_FILE" ] && [ -z "$(changed_files_for "$dir")" ]; then
-      record "project=$dir toolchain=$kind build=skipped reason=no-changed-files"; continue
+    if [ "$dir" != "." ] && [ "$CHANGED_STATUS" = ok ] && [ "$shared_changed" = false ] && [ -z "$(changed_files_for "$dir")" ]; then
+      record "project=$dir toolchain=${kind%-covered} build=skipped reason=no-changed-files"; continue
     fi
     log "== $dir ($kind)"
     case "$kind" in
       node) build_node "$dir" "$out" ;;
       php)  build_php  "$dir" "$out" ;;
       wp)   build_wp   "$dir" "$out" ;;
+      node-covered) record "project=$dir toolchain=node build=covered-by-root" ;;
     esac
   done < <(discover)
 
