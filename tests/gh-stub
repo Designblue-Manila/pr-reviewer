@@ -7,6 +7,7 @@
 #   api-fail             (flag) every `gh api` call exits 1 and prints nothing
 #   dismiss-fail         (flag) withdrawing a review (…/dismissals) is refused
 #   api-fail-inline      (flag) only the inline review comments (pulls/N/comments) fail
+#   pull.json            REST pulls/N (the PR itself)   request-fail (flag) a reviewer request is refused
 #   pages                (number) pretend --paginate returned this many pages: the --jq
 #                        filter runs once per page, the fixture on the first, [] on the rest
 # `--jq` filters are run through the real jq, so the filter text itself is under test.
@@ -36,12 +37,16 @@ case "${1:-} ${2:-}" in
       */dismissals)                      # PUT: withdraw a review; `dismiss-fail` (flag) refuses it
         [ -f "$STUB_DIR/dismiss-fail" ] && { echo "HTTP 403" >&2; exit 1; }
         echo '{}'; exit 0 ;;
+      */requested_reviewers)             # POST: ask a person to review; `request-fail` (flag) refuses
+        [ -f "$STUB_DIR/request-fail" ] && { echo "HTTP 422" >&2; exit 1; }
+        echo '{}'; exit 0 ;;
       */reviews)  f="$STUB_DIR/reviews.json" ;;
       */pulls/*/comments)                                          # inline review comments
         [ -f "$STUB_DIR/api-fail-inline" ] && { echo "HTTP 502" >&2; exit 1; }
         f="$STUB_DIR/review-comments.json" ;;
       */comments) f="$STUB_DIR/issue-comments.json" ;;
       */files)    f="$STUB_DIR/files.json" ;;      # REST pulls/N/files
+      */pulls/[0-9]*) f="$STUB_DIR/pull.json" ;;   # the PR itself — LAST: `*` spans slashes
       *) echo "gh-stub: unexpected api path $2" >&2; exit 97 ;;
     esac
     [ -f "$f" ] || echo '[]' > "$f"
