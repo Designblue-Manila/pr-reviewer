@@ -22,11 +22,15 @@ Designblue-Manila/pr-reviewer/.github/workflows/review.yml
         ├─ job review   Claude (Opus) reads the diff, the build logs, REVIEW-STANDARDS.md
         │               and the repo's own .github/REVIEW-NOTES.md, traces the impact
         │               radius, comments inline, then approves or requests changes.
+        │               scripts/approval-guard.sh then withdraws an approval that landed
+        │               on a commit this run did not read (a push mid-review).
         └─ job respond  someone answered back. Claude re-checks its own standing findings
                         against the code and posts one comment: per finding, stands /
-                        withdrawn / needs a human. No build, no fresh review. Runs only
-                        while the reviewer is blocking the PR, only for comments by
-                        people, and never on a fork PR.
+                        withdrawn / needs a human. No build, no fresh review. Only for
+                        comments by people, never on a fork PR. It never approves: after
+                        a won argument the full review of the next push (or of the PR
+                        closed and reopened) does. It can pull an approval when it
+                        confirms a missed defect (scripts/respond-withdraw.sh).
 ```
 
 - **Identity.** The review is posted by the Claude GitHub App (`claude`), which must be
@@ -103,13 +107,19 @@ monorepos), then per project:
 - **Node** — detects pnpm / yarn / npm from `packageManager` or the lockfile, Node version
   from `.nvmrc`, `.node-version` or `engines.node` (default 22), installs with the
   lockfile frozen (falls back and notes `lockfile=out-of-sync`), runs `lint`, `build`
-  and `test` where the scripts exist.
+  and `test` where the scripts exist. A failing `lint` is red.
 - **PHP / Laravel** — PHP version from `composer.json`, `php -l` on changed files,
   `composer install`, boots the app (`artisan about`), runs migrations on a fresh
   database (MySQL, or SQLite when `phpunit.xml` says so), runs the test suite. Test
   failures that are clearly the CI environment are reported as `unrunnable`, not red.
+  A failed migration is always red: `migrate_scope=pr` when the PR changed a migration,
+  `unconfirmed` when it did not — nothing here claims a failure predates the PR.
 - **WordPress** — `php -l` on changed PHP files.
-- A sub-project the PR did not touch is skipped.
+- A sub-project the PR did not touch is skipped, unless the PR changed a shared root
+  manifest or lockfile. A root `package.json` that declares workspaces or builds nothing
+  does not hide the apps under it; members its own build covers show `covered-by-root`.
+- When the PR's file list cannot be read, the summary says `changed_files=unavailable`,
+  every PHP file is syntax-checked and nothing is skipped.
 
 Result: one line per project in the job summary and in the artifact's `summary.txt`,
 plus per-project logs.
