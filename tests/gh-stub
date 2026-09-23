@@ -8,6 +8,8 @@
 #   dismiss-fail         (flag) withdrawing a review (…/dismissals) is refused
 #   api-fail-inline      (flag) only the inline review comments (pulls/N/comments) fail
 #   pull.json            REST pulls/N (the PR itself)   request-fail (flag) a reviewer request is refused
+#   review-notes.md      REST contents/.github/REVIEW-NOTES.md (raw); absent = HTTP 404
+#   notes-fail           (flag) reading it fails with a 502 instead
 #   pages                (number) pretend --paginate returned this many pages: the --jq
 #                        filter runs once per page, the fixture on the first, [] on the rest
 # `--jq` filters are run through the real jq, so the filter text itself is under test.
@@ -34,6 +36,10 @@ case "${1:-} ${2:-}" in
     [ -f "$STUB_DIR/api-fail" ] && exit 1
     filter="$(arg_after --jq "$@")"
     case "$2" in
+      */contents/*)                      # raw file from the base commit
+        [ -f "$STUB_DIR/notes-fail" ] && { echo "HTTP 502" >&2; exit 1; }
+        [ -f "$STUB_DIR/review-notes.md" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        cat "$STUB_DIR/review-notes.md"; exit 0 ;;
       */dismissals)                      # PUT: withdraw a review; `dismiss-fail` (flag) refuses it
         [ -f "$STUB_DIR/dismiss-fail" ] && { echo "HTTP 403" >&2; exit 1; }
         echo '{}'; exit 0 ;;

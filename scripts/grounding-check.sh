@@ -90,6 +90,8 @@ for line in open(sys.argv[2]):
     except Exception: continue
     body=re.sub(r"[A-Za-z][\w+.-]*://\S+","",body)
     body=body.replace("…/","").replace(".../","")
+    # a consumer repository's file (`owner/repo:path:line`) is not a file of THIS repo
+    body=re.sub(r"(?i)\b(?:Designblue-Manila|designbluemanila-create)/[\w.-]+:\S+","",body)
     # a segment may hold & + = $ and [ ] (Nuxt's [slug].vue): a split name is a false note
     # A path starts with a name character or a WHOLE bracket group (Nuxt's `[slug].vue`,
     # `[...slug].vue`) — never a bare `[`, so a markdown link `[Foo.php:12](…)` is read from

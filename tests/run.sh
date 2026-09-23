@@ -458,6 +458,10 @@ check "an invented path inside an INLINE finding is caught (review round 1)" "0/
 gfresh; greview CHANGES_REQUESTED abc123 'moved from `app/Old.php:5`; see `@/stores/cart.ts:9` and `vendor/laravel/framework/src/Illuminate/Http/Request.php:120` and `node_modules/x/index.js:1`
 docs at api.example.com/v1/users.json, import lodash-es/debounce.js, at 3.14:1'
 check "renames, @/ aliases, vendor/, node_modules/, hostnames, packages, numbers -> no false note (review round 1)" "0/0" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '`Designblue-Manila/brikk-inventory-v2:app/Http/Consumer.php:40` reads `.type`; `designbluemanila-create/site:app/pages/x.vue:3` too'
+check "a CONSUMER repo citation (owner/repo:path:line) is not checked against this repo" "0/0" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '`Designblue-Manila/brikk-web:app/x.vue:1` and our own `app/Invented.php:2`'
+check "  ...while this repo's own invented path beside it is still caught" "0/1/0" "$(gc)/$(posted)/$(grep -c 'x.vue' "$STUB_DIR/posted.1")"
 gfresh; greview CHANGES_REQUESTED abc123 '`~/components/Invented.vue:3` and `@/stores/Ghost.ts:1`'
 rc=$(gc)
 check "an invented aliased path is still caught" "0/1/1" "$rc/$(posted)/$(grep -c 'Invented.vue' "$STUB_DIR/posted.1")"
@@ -560,6 +564,86 @@ fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
 echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"
 echo '[{"body":"<!-- pr-reviewer:needs-human-ping:abc123 -->\nasked"}]' > "$STUB_DIR/issue-comments.json"; echo 3 > "$STUB_DIR/pages"
 check "already asked, the marker on page 1 of several -> not asked twice (review round 1)" "0/0" "$(nh)/$(posted)"
+
+echo "consumers.sh (which repos use this one: read from the DEFAULT branch, never the PR)"
+cons() { # env assignments as args
+  env REPO=Designblue-Manila/brikk-api NOTES_REF=main HAS_KEY=true GH_TOKEN=x "$@" \
+      bash "$ROOT/scripts/consumers.sh" > "$STUB_DIR/stdout" 2>&1
+  echo $?
+}
+list_out() { sed -n '/^list<<CONSUMERS_EOF$/,/^CONSUMERS_EOF$/p' "$GITHUB_OUTPUT" | sed '1d;$d' | paste -sd' ' -; }
+fresh
+check "no REVIEW-NOTES.md (404) -> nothing, a note, exit 0" "0/none listed (no .github/REVIEW-NOTES.md on main)/" "$(cons)/$(out note)/$(list_out)"
+check "  ...read from the DEFAULT branch"              1 "$(calls 'contents/.github/REVIEW-NOTES.md?ref=main')"
+fresh; touch "$STUB_DIR/notes-fail"
+check "unreadable (502) -> warning, 'unknown', exit 0" "0/unknown (the consumer list could not be read)/1" "$(cons)/$(out note)/$(grep -c '::warning::' "$STUB_DIR/stdout")"
+fresh; printf '# Notes\n\n- Designblue-Manila/brikk-web is mentioned outside the section\n' > "$STUB_DIR/review-notes.md"
+cons >/dev/null
+check "no Consumers section -> nothing listed"       "/" "$(list_out)/$(out manila)"
+fresh; cat > "$STUB_DIR/review-notes.md" <<'EOF'
+# brikk-api review notes
+
+## Consumers
+- Designblue-Manila/brikk-inventory-v2 — calls /api/transfers
+* `designbluemanila-create/kaimana-siargao-site@staging` (booking widget)
+- designblue-manila/Brikk-Web
+- Designblue-Manila/brikk-inventory-v2@dev
+- Designblue-Manila/brikk-api
+- someone-else/evil-repo
+- Designblue-Manila/../../etc
+- Designblue-Manila/x@-uhack
+- plain words, not a repo
+
+## Waivers
+- Designblue-Manila/not-a-consumer
+EOF
+cons >/dev/null
+check "list: section only, owners normalised, self + dupes + junk dropped" \
+  "Designblue-Manila/brikk-inventory-v2 designbluemanila-create/kaimana-siargao-site@staging Designblue-Manila/Brikk-Web" "$(list_out)"
+check "  ...token scopes per account"               "brikk-inventory-v2,Brikk-Web/kaimana-siargao-site" "$(out manila)/$(out create)"
+check "  ...ignored lines are warned about"         1 "$(grep -c '4 line(s) under' "$STUB_DIR/stdout")"
+fresh; printf '## Consumers\n- Designblue-Manila/a\n' > "$STUB_DIR/review-notes.md"
+cons HAS_KEY=false >/dev/null
+check "listed but no app key -> no list, a note that says so" "/listed but NOT checked out — this repository has no PR_REVIEWER_APP_KEY secret: Designblue-Manila/a" "$(list_out)/$(out note)"
+fresh; { echo '## Consumers'; for i in 1 2 3 4 5 6 7; do echo "- Designblue-Manila/r$i"; done; } > "$STUB_DIR/review-notes.md"
+cons >/dev/null
+check "more than 5 -> first 5 only, warned"         "5/1" "$(list_out | wc -w | tr -d ' ')/$(grep -c 'More than 5' "$STUB_DIR/stdout")"
+
+echo "clone-consumers.sh (read-only copies, token revoked, no .git left behind)"
+if git --version >/dev/null 2>&1; then
+  G="$(mktemp -d)"
+  for r in Designblue-Manila/brikk-web designbluemanila-create/site; do
+    mkdir -p "$G/src/$r"; git -C "$G/src/$r" init -q -b main
+    printf 'fetch("/api/transfers")\n' > "$G/src/$r/app.js"
+    git -C "$G/src/$r" -c user.email=t@t -c user.name=t add -A
+    git -C "$G/src/$r" -c user.email=t@t -c user.name=t commit -qm init
+    git -C "$G/src/$r" branch staging
+    mkdir -p "$G/remote/$(dirname "$r")"; git clone -q --bare "$G/src/$r" "$G/remote/$r.git"
+  done
+  clone() {
+    env DEST="$STUB_DIR/c" GIT_BASE="file://$G/remote" ALLOW_FILE_PROTOCOL=always API= \
+        TOKEN_MANILA=tokM TOKEN_CREATE=tokC "$@" bash "$ROOT/scripts/clone-consumers.sh" > "$STUB_DIR/stdout" 2>&1
+    echo $?
+  }
+  manifest() { sed -n '/^manifest<<MANIFEST_EOF$/,/^MANIFEST_EOF$/p' "$GITHUB_OUTPUT" | sed '1d;$d'; }
+  fresh
+  rc=$(clone LIST="Designblue-Manila/brikk-web
+designbluemanila-create/site@staging")
+  check "both cloned, exit 0"                        "0/2" "$rc/$(manifest | grep -c ' @ ')"
+  check "  ...files are there"                       "yes" "$([ -f "$STUB_DIR/c/Designblue-Manila/brikk-web/app.js" ] && echo yes)"
+  check "  ...no .git left (no remote URL, no config)" "0" "$(find "$STUB_DIR/c" -name .git | wc -l | tr -d ' ')"
+  check "  ...the @branch is the one checked out"    1 "$(manifest | grep -c 'designbluemanila-create/site @ staging')"
+  check "  ...the token appears nowhere on disk"     0 "$(grep -rl -e tokM -e tokC "$STUB_DIR/c" 2>/dev/null | wc -l | tr -d ' ')"
+  fresh
+  rc=$(clone TOKEN_CREATE= LIST="Designblue-Manila/brikk-web
+designbluemanila-create/site
+Designblue-Manila/does-not-exist")
+  check "no token for one account, one bad repo -> named NOT READ, exit 0" "0/1/2" "$rc/$(manifest | grep -c ' @ ')/$(manifest | grep -c 'NOT READ')"
+  check "  ...a failed clone leaves no folder"       "no" "$([ -e "$STUB_DIR/c/Designblue-Manila/does-not-exist" ] && echo yes || echo no)"
+  rm -rf "$G"
+else
+  echo "  skip  git not installed"
+fi
 
 echo "check-caller-contract.py (each mutation must be caught)"
 contract() { # perl substitution for review.yml, perl substitution for the template ('' = leave alone)
