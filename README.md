@@ -23,7 +23,9 @@ Designblue-Manila/pr-reviewer/.github/workflows/review.yml
         │               and the repo's own .github/REVIEW-NOTES.md, traces the impact
         │               radius, comments inline, then approves or requests changes.
         │               scripts/approval-guard.sh then withdraws an approval that landed
-        │               on a commit this run did not read (a push mid-review).
+        │               on a commit this run did not read (a push mid-review), and
+        │               scripts/grounding-check.sh notes any cited file that does not
+        │               exist, or a missing "no tests" line on an approval.
         └─ job respond  someone answered back. Claude re-checks its own standing findings
                         against the code and posts one comment: per finding, stands /
                         withdrawn / needs a human. No build, no fresh review. Only for

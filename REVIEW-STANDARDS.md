@@ -76,7 +76,11 @@ code wrongly is Important, because the claim is wrong — not because the docume
 it should be direct and to the point").
 
 - An approval is the headline plus at most two short lines, and only for things the
-  author cannot see for themselves. A green build does not need describing.
+  author cannot see for themselves. A green build does not need describing. Where the
+  repo has no tests, "No tests in this repository; build only." is added on top of those
+  two — it is required, not optional (point 1 above).
+- Every file path in a comment is one the reviewer opened or saw in the diff. A finding
+  it cannot place is named, not given an invented location.
 - A changes-requested is the headline plus one line per Important item:
   `file:line — what breaks — the fix`. Nothing else.
 - One sentence per point. No preamble, no restating the diff, no summarising what the
