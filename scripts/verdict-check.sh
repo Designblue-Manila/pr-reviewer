@@ -35,7 +35,7 @@ count() { tr -cd '0-9\n' | awk '{s+=$1} END {print s+0}'; }
 # `claude[bot]` today; if it ever says `claude`, an exact match would put a red check and
 # "nothing has read this diff" on top of a real review, on every PR in every repo.
 verdict="$("$GH" api "repos/$REPO/pulls/$PR/reviews" --paginate \
-  --jq "[.[] | select(((.user.login // \"\") | sub(\"\\\\[bot\\\\]\$\"; \"\")) == \"claude\" and .commit_id == \"$HEAD_SHA\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\"))] | length" \
+  --jq "[.[] | select(((.user.login // \"\") | sub(\"\\\\[bot\\\\]\$\"; \"\")) == \"claude\" and .commit_id == \"$HEAD_SHA\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\" or (.state == \"COMMENTED\" and ((.body // \"\") | startswith(\"<!-- pr-reviewer:needs-human -->\")))))] | length" \
   2>/dev/null | count || true)"
 
 if [ "${verdict:-0}" -gt 0 ]; then

@@ -90,8 +90,10 @@ fi
 # approval-guard.sh / respond-withdraw.sh — GitHub does not say who), verdict=DISMISSED,
 # so the conversation goes on instead of a false "no review on record".
 bot_reviews='[.reviews[]? | select((.author.login // "") | sub("\\[bot\\]$";"") == "claude")]'
-last_verdict="$bot_reviews | map(select(.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | last"
-verdict=$(jq -r "$last_verdict | .state // \"none\"" "$RUNNER_TEMP/pr.json")
+# a COMMENTED review starting with the needs-human marker is a verdict too: NEEDS_HUMAN
+last_verdict="$bot_reviews | map(select(.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\"
+  or (.state == \"COMMENTED\" and ((.body // \"\") | startswith(\"<!-- pr-reviewer:needs-human -->\"))))) | last"
+verdict=$(jq -r "$last_verdict | if .state == \"COMMENTED\" then \"NEEDS_HUMAN\" else (.state // \"none\") end" "$RUNNER_TEMP/pr.json")
 reviewed_sha=$(jq -r "$last_verdict | .commit.oid // \"\"" "$RUNNER_TEMP/pr.json")
 if [ "$verdict" = none ] && [ "$(jq -r "$bot_reviews | map(select(.state == \"DISMISSED\")) | length" "$RUNNER_TEMP/pr.json")" -gt 0 ]; then
   verdict=DISMISSED
@@ -138,7 +140,8 @@ echo "state=$state draft=$draft verdict=$verdict reviewed=$reviewed_sha build=$b
 # A question asked after an approval deserves an answer too, and an approval that turns
 # out to be wrong has to be withdrawable.
 if [ "$state" = OPEN ] && [ "$draft" = false ] \
-   && { [ "$verdict" = CHANGES_REQUESTED ] || [ "$verdict" = APPROVED ] || [ "$verdict" = DISMISSED ]; }; then
+   && { [ "$verdict" = CHANGES_REQUESTED ] || [ "$verdict" = APPROVED ] || [ "$verdict" = DISMISSED ] \
+        || [ "$verdict" = NEEDS_HUMAN ]; }; then
   echo "answer=true" >> "$GITHUB_OUTPUT"
   exit 0
 fi

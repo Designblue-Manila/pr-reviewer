@@ -20,11 +20,15 @@ Concretely, before an approval the reviewer has:
 2. **Traced the impact radius.** Every consumer of every changed symbol, component,
    route, field, migration, config key and dependency was found and read. The approval
    names them.
-3. **Checked cross-repo effects.** An API change names its consumer repos. The reviewer
-   cannot see a sibling repository, so a **missing consumer link is missing evidence, not
-   a defect: it is a Nit, raised once, and never blocks an approval.** What does block is
-   a change this repo's own code cannot survive. Say which consumers to check and why,
-   then approve on what you can see.
+3. **Checked cross-repo effects.** An ADDITIVE API change (new endpoint, new field, new
+   optional input) needs nothing more. A BREAKING one (a field renamed or removed, a route
+   renamed or removed, a new required input, stricter validation or auth, a request that
+   succeeds today and would now get an error) is approved only
+   when it is settled: the diff keeps the old contract working alongside the new, or the
+   PR links the consumer's matching change. Otherwise the verdict is **needs a human**:
+   the reviewer says what changed and what would settle it, and the Tech Lead (Camile)
+   decides (Philip, 23 Sep 2026). It is never a code finding — the reviewer has not seen
+   the consumer break. A change this repo's own code cannot survive is still Important.
 4. **Applied the house rules below**, security first.
 
 An approval is a safety statement written so the author can merge on it. The author

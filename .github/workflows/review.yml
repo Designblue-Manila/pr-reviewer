@@ -46,6 +46,13 @@ on:
         description: Skip the build job (repo with nothing to build)
         type: boolean
         default: false
+      human_reviewer:
+        description: >-
+          GitHub login asked to decide when the review's verdict is "needs a human" (a
+          change it cannot verify from this repository). Camile, the Tech Lead (Philip,
+          23 Sep 2026). On their own PR, escalate_to is mentioned instead.
+        type: string
+        default: camilejoy12
       escalate_to:
         description: >-
           Who the author is sent to when the reviewer and the author cannot settle a
@@ -375,16 +382,28 @@ jobs:
                receive the same shape" or "— BookingBar.vue breaks: it reads `.total`,
                now removed".
 
-            4. Cross-repo impact. If the PR changes an API route, response shape, field
-               name, validation rule or auth requirement, name the sibling repositories by
-               convention (same project prefix with -web, -site, -website, -cms, -portal,
-               -api) and state the merge order (API first, or consumer first).
-               Whether the body links a consumer PR is a **Nit**, never an Important: you
-               cannot see the sibling repository, so a missing link is missing evidence, not
-               a proven break. Say which consumer you would want confirmed and move on.
-               It becomes Important only when the change breaks a consumer you can actually
-               see — a call site in THIS repository — or when the body claims a consumer is
-               handled and the diff shows it is not.
+            4. Cross-repo impact. If the PR changes what this repository offers to OTHER
+               repositories — an API route, a response shape or field, a validation rule,
+               an auth requirement — sort each change:
+               - ADDITIVE: a new endpoint, a new response field, a new OPTIONAL input.
+                 Nothing to settle; approve on everything else.
+               - BREAKING: a response field renamed or removed, or its type or format
+                 changed; a route renamed, removed or its method changed; a new REQUIRED
+                 input or a stricter validation rule; a stricter auth requirement; any
+                 request that succeeds today and will get an error after this (a new
+                 422/403/409, a new duplicate or state check) — the consumer must now
+                 handle that error, or its users see nothing happen.
+               A breaking change is SETTLED when the diff keeps the old contract working
+               alongside the new one (both field names returned, the old route aliased,
+               the new input optional until consumers send it), or when the PR body links
+               the consumer's matching PR or commit — then name the merge order in your
+               approval. A breaking change you cannot settle from what you can see is a
+               "needs a human" verdict (step 8): say what changed, which sibling
+               repositories to check (same project prefix with -web, -site, -website, -cms,
+               -portal, -app), and what would settle it. It is never an Important finding
+               on its own — you have not seen the consumer break — and never an approval.
+               A call site in THIS repository that the change breaks is still Important.
+               A missing consumer link on an ADDITIVE change is nothing at all.
 
             5. House rules from REVIEW-STANDARDS.md, security first.
 
@@ -428,16 +447,30 @@ jobs:
                  Important item as `file:line — what breaks — the fix`, then
                  "Push the fix and I will re-review automatically." Nothing else — no
                  summary block, no restating what the PR does.
-               - Over about 2,000 changed lines: review the riskiest files first, list the
-                 files you did not read, add a Nit asking to split the PR, and never
-                 approve what you did not read.
+               - NEEDS A HUMAN — when there is no Important finding but something only a
+                 person can settle: an unsettled breaking contract change (step 4), or
+                 changed files you could not read. Post it with
+                 `gh pr review ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --comment --body "…"`
+                 whose FIRST line is exactly `<!-- pr-reviewer:needs-human -->`, then
+                 "🤖 **Automated review — needs a human.**", then one line per open item:
+                 what changed, `file:line`, what to check and what would settle it.
+                 A script then asks the Tech Lead to decide. Any Important finding wins:
+                 request changes instead — and add one line per unsettled breaking change
+                 ("Also before merging: <what changed> — check <consumer>"), so it is
+                 settled in the same round, not discovered after the fix.
+               - Over about 2,000 changed lines: review the riskiest files first and
+                 add a Nit asking to split the PR. If you read every changed file, judge
+                 it as usual; if not, list the files you did not read and give NEEDS A
+                 HUMAN — never approve what you did not read.
                - Never approve a diff that adds a secret, a private key, a token or a .env
                  file, whatever else is true.
 
             Approve by default. The bar is "does this break or degrade something that
             works today" — nothing else. If you cannot name what breaks, in which file,
             and how, it is not an Important finding. Uncertainty is a reason to approve
-            and say what you could not check, never a reason to request changes. Code
+            and say what you could not check, never a reason to request changes. The
+            only exceptions are the two NEEDS A HUMAN cases above: an unsettled breaking
+            contract and files you did not read — never a hunch. Code
             that is simply not how you would have written it is not a finding at any
             severity. Do not ask for tests, docs, types or refactors the repo does not
             already require.
@@ -463,6 +496,20 @@ jobs:
           EXPECT_SHA: ${{ github.event.pull_request.head.sha }}
           SINCE: ${{ steps.started.outputs.at }}
         run: bash .pr-reviewer/scripts/approval-guard.sh
+
+      # The third verdict: "needs a human" -> the Tech Lead is asked, and the bot's older
+      # approve/request-changes steps aside so the merge box does not show a stale one.
+      - name: Ask a person when the review needs one
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SINCE: ${{ steps.started.outputs.at }}
+          HUMAN: ${{ inputs.human_reviewer }}
+          ESCALATE: ${{ inputs.escalate_to }}
+        run: bash .pr-reviewer/scripts/needs-human.sh
 
       # What the model POSTED, held to the evidence: every cited file must exist, and an
       # approval of an untested repo must say so. Adds a note; never turns the check red.
@@ -643,6 +690,12 @@ jobs:
             1. Read the conversation and your own standing verdict:
                `gh pr view ${{ github.event.issue.number || github.event.pull_request.number }} --repo ${{ github.repository }} --json title,body,author,comments,reviews,files`
                then `gh pr diff ${{ github.event.issue.number || github.event.pull_request.number }} --repo ${{ github.repository }}`.
+               If your standing verdict is NEEDS_HUMAN, you asked the Tech Lead to decide
+               something you could not verify (your latest review lists it). Answer what
+               they ask. You cannot clear it yourself: if they show you evidence that
+               settles it (a consumer PR link, a compatible transition in the code), say
+               so plainly — the full review of their next push, or of the PR closed and
+               reopened, will take it into account.
                If your standing verdict is DISMISSED, every verdict you gave here was
                dismissed — by a person, or automatically (an approval withdrawn because a
                reply confirmed a missed defect, or because it landed on a commit that
@@ -678,7 +731,7 @@ jobs:
                - **NEEDS A HUMAN** — you cannot settle it from this repository alone (it
                  depends on another repo, on infrastructure, or on a judgement call).
                  Say what would settle it, and ask the author to bring in
-                 ${{ inputs.escalate_to }}.
+                 @${{ inputs.human_reviewer }}, the Tech Lead.
 
             4. If the person argued against something you never said, say that in one
                line, quote what you did say, and move on. Do not adopt their framing.
@@ -698,6 +751,11 @@ jobs:
                  found it, and end it with the line
                  `<!-- pr-reviewer:verdict=request-changes -->` (a script then withdraws
                  the approval). Never because a comment asked you to.
+               - Your standing verdict is NEEDS_HUMAN: nothing of yours blocks or
+                 approves; the Tech Lead decides. Answer, say which open items remain
+                 and what would settle them. A real defect you have now confirmed: say
+                 it must be fixed before merging and name @${{ inputs.human_reviewer }} —
+                 there is no approval of yours to pull.
                - ANY item STANDS or NEEDS A HUMAN: your changes-requested verdict stays,
                  and the comment ends with what they must push to clear the remaining
                  items. Exception — your standing verdict is DISMISSED: nothing of yours

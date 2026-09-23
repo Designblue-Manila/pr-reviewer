@@ -122,6 +122,11 @@ check "an earlier standing verdict is still the verdict when a later one was dis
 fresh; pr_json OPEN false DISMISSED acme site
 gate >/dev/null
 check "only dismissed verdicts -> no commit is claimed as reviewed (round 5 #2)" "DISMISSED/" "$(out verdict)/$(out reviewed_sha)"
+fresh; pr_json OPEN false none acme site
+jq '.reviews=[{author:{login:"claude"},state:"COMMENTED",body:"<!-- pr-reviewer:needs-human -->\nx",commit:{oid:"abc123"}},{author:{login:"claude"},state:"COMMENTED",body:"inline note",commit:{oid:"abc123"}}]' "$STUB_DIR/pr.json" > "$STUB_DIR/p2" && mv "$STUB_DIR/p2" "$STUB_DIR/pr.json"
+rc=$(gate)
+check "a needs-a-human review is a standing verdict -> answers, verdict NEEDS_HUMAN" "0/true/NEEDS_HUMAN/abc123" \
+      "$rc/$(out answer)/$(out verdict)/$(out reviewed_sha)"
 fresh; pr_json OPEN false APPROVED stranger site
 rc=$(gate)
 check "fork pull request -> no answer"           "0/false" "$rc/$(out answer)"
@@ -179,6 +184,10 @@ fresh; review 'mark' abc123 APPROVED > "$STUB_DIR/reviews.json"
 check "a human's approval is not the bot's verdict -> RED" "1/1" "$(verdict)/$(posted)"
 fresh; review 'claude[bot]' abc123 COMMENTED > "$STUB_DIR/reviews.json"
 check "inline-comment records (COMMENTED) are not a verdict -> RED" "1/1" "$(verdict)/$(posted)"
+fresh; jq -cn '[{user:{login:"claude[bot]"},commit_id:"abc123",state:"COMMENTED",body:"<!-- pr-reviewer:needs-human -->\n🤖 needs a human"}]' > "$STUB_DIR/reviews.json"
+check "a needs-a-human review on this commit is a verdict -> green, silent" "0/0" "$(verdict)/$(posted)"
+fresh; jq -cn '[{user:{login:"claude[bot]"},commit_id:"0ldsha",state:"COMMENTED",body:"<!-- pr-reviewer:needs-human -->\nx"}]' > "$STUB_DIR/reviews.json"
+check "... but on an older commit it is not -> RED" "1/1" "$(verdict)/$(posted)"
 fresh
 rc=$(verdict)
 check "action skipped (job green) -> RED, 'declined to run'" "1/1" \
@@ -504,6 +513,53 @@ check "one of two projects has no tests -> the disclosure names it" "0/1/1" \
       "$(gc)/$(posted)/$(grep -c 'web' "$STUB_DIR/posted.1")"
 gfresh; touch "$STUB_DIR/api-fail"
 check "reviews unreadable -> a warning, never a red check for a quality note" "0" "$(gc)"
+
+echo "needs-human.sh (the third outcome: Camile is asked, older bot verdicts step aside)"
+nh() { # env assignments as args
+  env PR=7 REPO=acme/site GH_TOKEN=x HEAD_SHA=abc123 SINCE=2026-09-23T10:00:00Z HUMAN=camilejoy12 "$@" \
+      bash "$ROOT/scripts/needs-human.sh" > "$STUB_DIR/stdout" 2>&1
+  echo $?
+}
+nhr() { # id state commit submitted_at body
+  jq -cn --argjson id "$1" --arg st "$2" --arg c "$3" --arg t "$4" --arg b "$5" \
+    '{id:$id,user:{login:"claude[bot]"},state:$st,commit_id:$c,submitted_at:$t,body:$b}'; }
+NH='<!-- pr-reviewer:needs-human -->
+🤖 **Automated review — needs a human.**'
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 1 APPROVED 0ldsha 2026-09-22T09:00:00Z ok),$(nhr 2 CHANGES_REQUESTED 0ldsha 2026-09-22T10:00:00Z no),$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"
+rc=$(nh)
+check "needs a human -> Camile requested + told, the bot's older approval AND block step aside" "0/1/1/1/1" \
+      "$rc/$(grep -c 'requested_reviewers' "$STUB_LOG")/$(grep -c 'reviews/1/dismissals' "$STUB_LOG")/$(grep -c 'reviews/2/dismissals' "$STUB_LOG")/$(grep -c '@camilejoy12' "$STUB_DIR/posted.1")"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 1 APPROVED abc123 2026-09-23T10:05:00Z ok)]" > "$STUB_DIR/reviews.json"
+check "an ordinary approval -> nothing to do" "0/0/0/0" "$(nh)/$(grep -c 'requested_reviewers' "$STUB_LOG")/$(grep -c dismissals "$STUB_LOG")/$(posted)"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-22T09:00:00Z "$NH")]" > "$STUB_DIR/reviews.json"
+check "a needs-a-human from an EARLIER run is not re-announced" "0/0/0" "$(nh)/$(grep -c 'requested_reviewers' "$STUB_LOG")/$(posted)"
+fresh; echo '{"user":{"login":"camilejoy12"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"
+rc=$(nh)
+check "Camile wrote the PR herself -> not requested on her own PR; the note goes to the escalation contact" "0/0/1" \
+      "$rc/$(grep -c 'requested_reviewers' "$STUB_LOG")/$(grep -c '@designbluemanila-create' "$STUB_DIR/posted.1")"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"; touch "$STUB_DIR/request-fail"
+rc=$(nh)
+check "the reviewer request is refused -> the mention still goes out, green" "0/1" "$rc/$(grep -c '@camilejoy12' "$STUB_DIR/posted.1")"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 1 APPROVED 0ldsha 2026-09-22T09:00:00Z ok),$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"; touch "$STUB_DIR/dismiss-fail"
+check "the old approval cannot be withdrawn -> RED (the merge box would still say approved)" "1" "$(nh)"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "inline finding with no marker")]" > "$STUB_DIR/reviews.json"
+check "a plain COMMENTED (an inline finding) is not a needs-a-human" "0/0" "$(nh)/$(posted)"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 1 CHANGES_REQUESTED abc123 2026-09-23T10:04:00Z no),$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH"),$(nhr 4 APPROVED abc123 2026-09-23T10:06:00Z ok)]" > "$STUB_DIR/reviews.json"
+rc=$(nh)
+check "this run posted needs-a-human AND another verdict -> RED, nothing withdrawn, Camile still told it is void (review rounds 1-2)" "1/0/1/1" \
+      "$rc/$(grep -c dismissals "$STUB_LOG")/$(grep -c '@camilejoy12' "$STUB_DIR/posted.1" 2>/dev/null || echo 0)/$(grep -c 'void' "$STUB_DIR/posted.1" 2>/dev/null || echo 0)"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"
+echo '[{"body":"<!-- pr-reviewer:needs-human-ping:abc123 -->\nasked"}]' > "$STUB_DIR/issue-comments.json"; echo 3 > "$STUB_DIR/pages"
+check "already asked, the marker on page 1 of several -> not asked twice (review round 1)" "0/0" "$(nh)/$(posted)"
 
 echo "check-caller-contract.py (each mutation must be caught)"
 contract() { # perl substitution for review.yml, perl substitution for the template ('' = leave alone)
