@@ -122,6 +122,11 @@ check "an earlier standing verdict is still the verdict when a later one was dis
 fresh; pr_json OPEN false DISMISSED acme site
 gate >/dev/null
 check "only dismissed verdicts -> no commit is claimed as reviewed (round 5 #2)" "DISMISSED/" "$(out verdict)/$(out reviewed_sha)"
+fresh; pr_json OPEN false none acme site
+jq '.reviews=[{author:{login:"claude"},state:"COMMENTED",body:"<!-- pr-reviewer:needs-human -->\nx",commit:{oid:"abc123"}},{author:{login:"claude"},state:"COMMENTED",body:"inline note",commit:{oid:"abc123"}}]' "$STUB_DIR/pr.json" > "$STUB_DIR/p2" && mv "$STUB_DIR/p2" "$STUB_DIR/pr.json"
+rc=$(gate)
+check "a needs-a-human review is a standing verdict -> answers, verdict NEEDS_HUMAN" "0/true/NEEDS_HUMAN/abc123" \
+      "$rc/$(out answer)/$(out verdict)/$(out reviewed_sha)"
 fresh; pr_json OPEN false APPROVED stranger site
 rc=$(gate)
 check "fork pull request -> no answer"           "0/false" "$rc/$(out answer)"
@@ -179,6 +184,10 @@ fresh; review 'mark' abc123 APPROVED > "$STUB_DIR/reviews.json"
 check "a human's approval is not the bot's verdict -> RED" "1/1" "$(verdict)/$(posted)"
 fresh; review 'claude[bot]' abc123 COMMENTED > "$STUB_DIR/reviews.json"
 check "inline-comment records (COMMENTED) are not a verdict -> RED" "1/1" "$(verdict)/$(posted)"
+fresh; jq -cn '[{user:{login:"claude[bot]"},commit_id:"abc123",state:"COMMENTED",body:"<!-- pr-reviewer:needs-human -->\n🤖 needs a human"}]' > "$STUB_DIR/reviews.json"
+check "a needs-a-human review on this commit is a verdict -> green, silent" "0/0" "$(verdict)/$(posted)"
+fresh; jq -cn '[{user:{login:"claude[bot]"},commit_id:"0ldsha",state:"COMMENTED",body:"<!-- pr-reviewer:needs-human -->\nx"}]' > "$STUB_DIR/reviews.json"
+check "... but on an older commit it is not -> RED" "1/1" "$(verdict)/$(posted)"
 fresh
 rc=$(verdict)
 check "action skipped (job green) -> RED, 'declined to run'" "1/1" \
@@ -405,6 +414,152 @@ fresh; touch "$STUB_DIR/api-fail"
 check "comments unreadable -> RED" "1" "$(wd)"
 fresh; echo "[$(ic 'claude[bot]' 2026-09-23T10:05:00Z "   ")]" > "$STUB_DIR/issue-comments.json"
 check "a blank bot comment does not break the check (round 5 #3)" "0/0" "$(wd)/$(dismissed)"
+
+echo "grounding-check.sh (what the bot posted cites real files, and says 'no tests' when true)"
+gc() { # env assignments as args; runs inside a fake checkout ($GC)
+  (cd "$GC" && env PR=7 REPO=acme/site GH_TOKEN=x HEAD_SHA=abc123 SINCE=2026-09-23T10:00:00Z MODE=review RUN_KEY=run1 \
+     SUMMARY_FILE="$GC/summary.txt" "$@" bash "$ROOT/scripts/grounding-check.sh" > "$STUB_DIR/stdout" 2>&1)
+  echo $?
+}
+gfresh() { # a checkout holding app/Real.php and pages/index.vue; build summary with tests
+  fresh; GC="$(mktemp -d)"; mkdir -p "$GC/app" "$GC/pages"; : > "$GC/app/Real.php"; : > "$GC/pages/index.vue"
+  printf 'project=. toolchain=php install=ok tests=passed:12\noverall=green\n' > "$GC/summary.txt"
+  echo '[{"filename":"app/Real.php","status":"modified"},{"filename":"app/Gone.php","status":"removed"},{"filename":"app/New.php","status":"renamed","previous_filename":"app/Old.php"}]' > "$STUB_DIR/files.json"
+  mkdir -p "$GC/stores"; : > "$GC/stores/cart.ts"
+  echo '[]' > "$STUB_DIR/reviews.json"; echo '[]' > "$STUB_DIR/issue-comments.json"
+}
+greview() { # state commit body
+  jq -cn --arg st "$1" --arg c "$2" --arg b "$3" '[{id:1,user:{login:"claude[bot]"},state:$st,commit_id:$c,submitted_at:"2026-09-23T10:05:00Z",body:$b}]' > "$STUB_DIR/reviews.json"; }
+greply() { # body
+  jq -cn --arg b "$1" '[{user:{login:"claude[bot]"},created_at:"2026-09-23T10:05:00Z",body:$b,html_url:"https://example/c/1"}]' > "$STUB_DIR/issue-comments.json"; }
+
+gfresh; greview CHANGES_REQUESTED abc123 '🤖 **Automated review — changes requested.**
+`app/Real.php:12` — breaks X — fix Y'
+check "every cited file exists -> silent" "0/0" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '🤖 **Automated review — changes requested.**
+`app/Http/Controllers/OrderController.php:40` — breaks X — fix Y'
+rc=$(gc)
+check "a cited file that exists nowhere -> one correction naming it, still green (E22)" "0/1/1" \
+      "$rc/$(posted)/$(grep -c 'OrderController.php' "$STUB_DIR/posted.1")"
+gfresh; mkdir -p "$GC/components/ContactUs" "$GC/components/global"; : > "$GC/components/ContactUs/ContactUsForm.vue"; : > "$GC/components/global/FaqSection.vue"
+greview CHANGES_REQUESTED abc123 '`ContactUs/ContactUsForm.vue:10` and `…/FaqSection.vue:4` and `.../global/FaqSection.vue`'
+check "a shortened path that ends a real file's path is found (designbluemanila-web#85)" "0/0" "$(gc)/$(posted)"
+gfresh; jq -c '. + .' <<< "$(jq -cn '[{id:1,user:{login:"claude[bot]"},state:"CHANGES_REQUESTED",commit_id:"abc123",submitted_at:"2026-09-23T10:05:00Z",body:"`app/Nope.php:1` x"}]')" > "$STUB_DIR/reviews.json"
+check "two reviews citing the same missing file in one run -> ONE note" "0/1" "$(gc)/$(posted)"
+gfresh; jq -cn '[{id:1,user:{login:"claude[bot]"},state:"COMMENTED",commit_id:"abc123",submitted_at:"2026-09-23T10:05:00Z",body:"`app/One.php:1` x"},
+                 {id:2,user:{login:"claude[bot]"},state:"CHANGES_REQUESTED",commit_id:"abc123",submitted_at:"2026-09-23T10:06:00Z",body:"`app/Invented.php:2` y"}]' > "$STUB_DIR/reviews.json"
+rc=$(gc)
+check "two reviews citing DIFFERENT missing files -> one note naming both (review round 1)" "0/1/1/1" \
+      "$rc/$(posted)/$(grep -c 'One.php' "$STUB_DIR/posted.1")/$(grep -c 'Invented.php' "$STUB_DIR/posted.1")"
+gfresh; greview CHANGES_REQUESTED abc123 'x'
+echo '[{"user":{"login":"claude[bot]"},"created_at":"2026-09-23T10:05:00Z","body":"**Important:** this calls `app/Services/Ghost.php:30`","path":"app/Real.php","line":3}]' > "$STUB_DIR/review-comments.json"
+rc=$(gc)
+check "an invented path inside an INLINE finding is caught (review round 1)" "0/1/1" "$rc/$(posted)/$(grep -c 'Ghost.php' "$STUB_DIR/posted.1")"
+gfresh; greview CHANGES_REQUESTED abc123 'moved from `app/Old.php:5`; see `@/stores/cart.ts:9` and `vendor/laravel/framework/src/Illuminate/Http/Request.php:120` and `node_modules/x/index.js:1`
+docs at api.example.com/v1/users.json, import lodash-es/debounce.js, at 3.14:1'
+check "renames, @/ aliases, vendor/, node_modules/, hostnames, packages, numbers -> no false note (review round 1)" "0/0" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '`~/components/Invented.vue:3` and `@/stores/Ghost.ts:1`'
+rc=$(gc)
+check "an invented aliased path is still caught" "0/1/1" "$rc/$(posted)/$(grep -c 'Invented.vue' "$STUB_DIR/posted.1")"
+gfresh; mkdir -p "$GC/app/components/Landing" "$GC/app/pages/careers"; : > "$GC/app/components/Landing/WebDesign&DevelopmentSection.vue"; : > "$GC/app/pages/careers/[slug].vue"
+greview CHANGES_REQUESTED abc123 'Callers: `Landing/WebDesign&DevelopmentSection.vue:12`, `app/pages/careers/[slug].vue:42`'
+check "file names with & and [slug] are read whole (designbluemanila-web#85)" "0/0" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '`app/pages/jobs/[id].vue:3`'
+check "... and an invented [id].vue page is still caught" "0/1" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 'see [Real.php:12](https://github.com/acme/site/blob/abc123/app/Real.php#L12) and [app/Nope.php:3] and path=app/Ghost.php:4'
+rc=$(gc)
+check "link-style and bracketed citations are read (review round 2)" "0/1/0/1/1" \
+      "$rc/$(posted)/$(grep -c 'Real.php' "$STUB_DIR/posted.1")/$(grep -c 'Nope.php' "$STUB_DIR/posted.1")/$(grep -c 'Ghost.php' "$STUB_DIR/posted.1")"
+gfresh; greview CHANGES_REQUESTED abc123 '`app/Nope.php:1` x'
+touch "$STUB_DIR/api-fail-inline"
+rc=$(gc)
+check "inline comments unreadable -> review bodies are still checked (review round 2)" "0/1" "$rc/$(posted)"
+gfresh; mkdir -p "$GC/pages/blog"; : > "$GC/pages/blog/[slug].vue"; : > "$GC/pages/blog/[...slug].vue"
+greview CHANGES_REQUESTED abc123 'Dynamic pages: `[slug].vue:3` and `[...slug].vue:5`'
+check "a Nuxt page cited by its bare [slug].vue name is found (review round 3)" "0/0" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '`[ghost].vue:2`'
+check "... and an invented bare [ghost].vue is caught" "0/1" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '`app/Gone.php:3` — the PR deleted a file something still loads'
+check "a file this PR deleted is a real reference" "0/0" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 'see https://example.com/docs/page.html:8 and `vue.config` and v1.2.3'
+check "URLs, bare words and version numbers are not file references" "0/0" "$(gc)/$(posted)"
+gfresh; greply '🤖 **Automated reply.**
+`app/Missing.php:9` — WITHDRAWN — it was fine'
+rc=$(gc MODE=reply)
+check "reply: a made-up path in the reply is corrected too" "0/1" "$rc/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '`app/Nope.php:1` — x'
+echo '[{"user":{"login":"github-actions[bot]"},"created_at":"2026-09-23T10:06:00Z","body":"<!-- pr-reviewer:grounding:run1 -->\nalready said"}]' > "$STUB_DIR/issue-comments.json"
+check "the same run does not correct twice" "0/0" "$(gc)/$(posted)"
+gfresh; greview CHANGES_REQUESTED abc123 '`app/Nope.php:1` — x'
+jq '.[0].submitted_at="2026-09-22T09:00:00Z"' "$STUB_DIR/reviews.json" > "$STUB_DIR/r2" && mv "$STUB_DIR/r2" "$STUB_DIR/reviews.json"
+check "an earlier run's review is not this run's business" "0/0" "$(gc)/$(posted)"
+
+gfresh; printf 'project=. toolchain=node install=ok build=ok tests=none\noverall=green\n' > "$GC/summary.txt"
+greview APPROVED abc123 '🤖 **Automated review — safe to merge. You can merge this to `main` now.**'
+rc=$(gc)
+check "approval on a repo with no tests that omits it -> the disclosure is added (E12)" "0/1/1" \
+      "$rc/$(posted)/$(grep -ci 'no automated tests' "$STUB_DIR/posted.1")"
+gfresh; printf 'project=. toolchain=node install=ok build=ok tests=none\noverall=green\n' > "$GC/summary.txt"
+greview APPROVED abc123 '🤖 **Automated review — safe to merge.** No tests in this repository; build only.'
+check "approval that already says it -> silent" "0/0" "$(gc)/$(posted)"
+gfresh; printf 'project=. toolchain=node install=ok build=ok tests=none\noverall=green\n' > "$GC/summary.txt"
+greview APPROVED abc123 '🤖 **Automated review — safe to merge.** This PR adds no tests for the new helper.'
+check "'adds no tests for X' is not the disclosure (review round 1)" "0/1" "$(gc)/$(posted)"
+gfresh; greview APPROVED abc123 '🤖 **Automated review — safe to merge.**'
+check "approval on a repo WITH tests -> no disclosure needed" "0/0" "$(gc)/$(posted)"
+gfresh; printf 'project=api toolchain=php tests=passed:3\nproject=web toolchain=node tests=none\noverall=green\n' > "$GC/summary.txt"
+greview APPROVED abc123 '🤖 **Automated review — safe to merge.**'
+check "one of two projects has no tests -> the disclosure names it" "0/1/1" \
+      "$(gc)/$(posted)/$(grep -c 'web' "$STUB_DIR/posted.1")"
+gfresh; touch "$STUB_DIR/api-fail"
+check "reviews unreadable -> a warning, never a red check for a quality note" "0" "$(gc)"
+
+echo "needs-human.sh (the third outcome: Camile is asked, older bot verdicts step aside)"
+nh() { # env assignments as args
+  env PR=7 REPO=acme/site GH_TOKEN=x HEAD_SHA=abc123 SINCE=2026-09-23T10:00:00Z HUMAN=camilejoy12 "$@" \
+      bash "$ROOT/scripts/needs-human.sh" > "$STUB_DIR/stdout" 2>&1
+  echo $?
+}
+nhr() { # id state commit submitted_at body
+  jq -cn --argjson id "$1" --arg st "$2" --arg c "$3" --arg t "$4" --arg b "$5" \
+    '{id:$id,user:{login:"claude[bot]"},state:$st,commit_id:$c,submitted_at:$t,body:$b}'; }
+NH='<!-- pr-reviewer:needs-human -->
+🤖 **Automated review — needs a human.**'
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 1 APPROVED 0ldsha 2026-09-22T09:00:00Z ok),$(nhr 2 CHANGES_REQUESTED 0ldsha 2026-09-22T10:00:00Z no),$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"
+rc=$(nh)
+check "needs a human -> Camile requested + told, the bot's older approval AND block step aside" "0/1/1/1/1" \
+      "$rc/$(grep -c 'requested_reviewers' "$STUB_LOG")/$(grep -c 'reviews/1/dismissals' "$STUB_LOG")/$(grep -c 'reviews/2/dismissals' "$STUB_LOG")/$(grep -c '@camilejoy12' "$STUB_DIR/posted.1")"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 1 APPROVED abc123 2026-09-23T10:05:00Z ok)]" > "$STUB_DIR/reviews.json"
+check "an ordinary approval -> nothing to do" "0/0/0/0" "$(nh)/$(grep -c 'requested_reviewers' "$STUB_LOG")/$(grep -c dismissals "$STUB_LOG")/$(posted)"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-22T09:00:00Z "$NH")]" > "$STUB_DIR/reviews.json"
+check "a needs-a-human from an EARLIER run is not re-announced" "0/0/0" "$(nh)/$(grep -c 'requested_reviewers' "$STUB_LOG")/$(posted)"
+fresh; echo '{"user":{"login":"camilejoy12"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"
+rc=$(nh)
+check "Camile wrote the PR herself -> not requested on her own PR; the note goes to the escalation contact" "0/0/1" \
+      "$rc/$(grep -c 'requested_reviewers' "$STUB_LOG")/$(grep -c '@designbluemanila-create' "$STUB_DIR/posted.1")"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"; touch "$STUB_DIR/request-fail"
+rc=$(nh)
+check "the reviewer request is refused -> the mention still goes out, green" "0/1" "$rc/$(grep -c '@camilejoy12' "$STUB_DIR/posted.1")"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 1 APPROVED 0ldsha 2026-09-22T09:00:00Z ok),$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"; touch "$STUB_DIR/dismiss-fail"
+check "the old approval cannot be withdrawn -> RED (the merge box would still say approved)" "1" "$(nh)"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "inline finding with no marker")]" > "$STUB_DIR/reviews.json"
+check "a plain COMMENTED (an inline finding) is not a needs-a-human" "0/0" "$(nh)/$(posted)"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 1 CHANGES_REQUESTED abc123 2026-09-23T10:04:00Z no),$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH"),$(nhr 4 APPROVED abc123 2026-09-23T10:06:00Z ok)]" > "$STUB_DIR/reviews.json"
+rc=$(nh)
+check "this run posted needs-a-human AND another verdict -> RED, nothing withdrawn, Camile still told it is void (review rounds 1-2)" "1/0/1/1" \
+      "$rc/$(grep -c dismissals "$STUB_LOG")/$(grep -c '@camilejoy12' "$STUB_DIR/posted.1" 2>/dev/null || echo 0)/$(grep -c 'void' "$STUB_DIR/posted.1" 2>/dev/null || echo 0)"
+fresh; echo '{"user":{"login":"mark"}}' > "$STUB_DIR/pull.json"
+echo "[$(nhr 3 COMMENTED abc123 2026-09-23T10:05:00Z "$NH")]" > "$STUB_DIR/reviews.json"
+echo '[{"body":"<!-- pr-reviewer:needs-human-ping:abc123 -->\nasked"}]' > "$STUB_DIR/issue-comments.json"; echo 3 > "$STUB_DIR/pages"
+check "already asked, the marker on page 1 of several -> not asked twice (review round 1)" "0/0" "$(nh)/$(posted)"
 
 echo "check-caller-contract.py (each mutation must be caught)"
 contract() { # perl substitution for review.yml, perl substitution for the template ('' = leave alone)
