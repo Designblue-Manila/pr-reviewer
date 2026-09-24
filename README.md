@@ -72,6 +72,10 @@ On that first PR only the `build` job is meaningful: the Claude action validates
 workflow against the default branch before it takes a token, so the first real review
 lands on the next PR opened after the caller is merged.
 
+Optional: a `## Consumers` list in `.github/REVIEW-NOTES.md` plus the `PR_REVIEWER_APP_KEY`
+secret lets the review read the repositories that call this one (read-only; see
+REVIEW-STANDARDS.md → "Consumers").
+
 Optional: a `.github/REVIEW-NOTES.md` in the repo with waivers and context the reviewer
 should know (which folder is generated, which repo consumes this API, an agreed design
 exception). It cannot relax security, data, build or impact rules.

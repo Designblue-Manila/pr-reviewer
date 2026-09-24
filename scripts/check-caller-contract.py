@@ -29,6 +29,10 @@ for out of one person's subscription. So three more checks:
      back in the caller is logic that costs a pull request per repo to change
   5. the tags line up: REVIEWER_REF and the template's `@tag` are both known release
      tags, and the workflow's concurrency group is not the old callers' group name
+  6. every secret the template passes is declared by review.yml, and every secret
+     review.yml REQUIRES is passed. Passing one the called workflow does not declare
+     is a startup error on every repo that takes the template — so a new secret is
+     declared (optional) and released BEFORE the template starts passing it
 
     check-caller-contract.py --print-gates     regenerate tests/gates.golden (stdout)
 
@@ -193,6 +197,41 @@ def job_gates(path):
     return gates
 
 
+def workflow_secrets(path):
+    """(declared, required) secret names under on.workflow_call.secrets."""
+    declared, required, cur, inside = [], [], None, False
+    for raw in uncommented(path):
+        if re.match(r"^    secrets:\s*$", raw):
+            inside = True; continue
+        if inside:
+            m = re.match(r"^      ([A-Za-z_][A-Za-z0-9_]*):\s*$", raw)
+            if m:
+                cur = m.group(1); declared.append(cur); continue
+            m = re.match(r"^        required:\s*(\S+)", raw)
+            if m and cur:
+                if m.group(1) == "true":
+                    required.append(cur)
+                continue
+            if re.match(r"^ {0,4}\S", raw):
+                inside = False
+    return declared, required
+
+
+def caller_secrets(path):
+    """Secret names the caller passes under jobs.<job>.secrets."""
+    names, inside = [], False
+    for raw in uncommented(path):
+        if re.match(r"^    secrets:\s*$", raw):
+            inside = True; continue
+        if inside:
+            m = re.match(r"^      ([A-Za-z_][A-Za-z0-9_]*):", raw)
+            if m:
+                names.append(m.group(1)); continue
+            if re.match(r"^ {0,4}\S", raw):
+                inside = False
+    return names
+
+
 def read_golden(path):
     golden = {}
     try:
@@ -328,6 +367,17 @@ def main(review_path="./.github/workflows/review.yml", caller_path="./caller-tem
             f"{review_path}: concurrency group `{m.group(1)}` must start `prr-`. Older callers use "
             f"`pr-review-…`, and a caller and a called workflow sharing a group cancel each other."
         )
+
+    # 6. secrets: what the template passes vs what the workflow declares
+    declared, required = workflow_secrets(review_path)
+    passed = caller_secrets(caller_path)
+    for name in sorted(set(passed) - set(declared)):
+        problems.append(
+            f"{caller_path}: passes secret `{name}`, which {review_path} does not declare. GitHub "
+            f"refuses to start the run. Declare it (required: false) and release that first."
+        )
+    for name in sorted(set(required) - set(passed)):
+        problems.append(f"{caller_path}: does not pass `{name}`, which {review_path} requires.")
 
     if problems:
         print("Caller contract broken:\n")

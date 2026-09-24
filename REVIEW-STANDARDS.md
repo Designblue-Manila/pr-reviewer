@@ -180,6 +180,36 @@ after this file. Use it for:
 
 It cannot relax a security rule, a data rule, or the build and impact checks.
 
+### Consumers: the repositories that use this one
+
+An API (or any repository others call) should list who calls it:
+
+    ## Consumers
+    - Designblue-Manila/brikk-inventory-v2 — calls /api/transfers
+    - designbluemanila-create/kaimana-siargao-site@staging
+
+One `owner/repo` per line, optionally `@branch` (default: that repository's default
+branch), in `Designblue-Manila` or `designbluemanila-create`, at most five. The review
+job checks them out read-only before the reviewer starts, with a short-lived token from
+the read-only GitHub App; the reviewer never holds the token. The list is read from the
+**default** branch, so a pull request cannot change whose code its own review reads — not
+even one opened into a branch its author made — and a new list takes effect once merged.
+The repository needs the `PR_REVIEWER_APP_KEY` secret; without it the list is named in
+the review as not read.
+
+**Who gets the key.** Anyone who can push to a repository can read its secrets with a
+workflow of their own, and the key does not expire. So the key goes ONLY to repositories
+that have a `## Consumers` list — never fleet-wide — and the app is installed on the
+listed consumer repositories only ("Only select repositories"), not on every repository.
+Rotate the key (generate a new one, replace the secret, delete the old key) when anyone
+with write access to a keyed repository leaves.
+
+With a consumer's code in hand, a breaking API change (step 4 of the review) is settled
+by reading it: a consumer that does not use what changed, or already handles it, settles
+it; a consumer line that would break is an Important finding, citing
+`owner/repo:path:line`, unless the PR links that consumer's matching change. Only what
+the reviewer still cannot see goes to a person ("needs a human").
+
 ## Large pull requests
 
 Over roughly 2,000 changed lines the reviewer reads the riskiest files first, lists the
