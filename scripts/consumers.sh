@@ -89,7 +89,8 @@ if [ "$HAS_KEY" != true ]; then
   exit 0
 fi
 
-names() { printf '%s\n' "$list" | grep "^$1/" | sed -E "s#^$1/##; s#@.*##" | sort -u | paste -sd, -; }
+# LC_ALL=C: byte order, the same on every machine (a Linux runner's locale sorts case-insensitively).
+names() { printf '%s\n' "$list" | grep "^$1/" | sed -E "s#^$1/##; s#@.*##" | LC_ALL=C sort -u | paste -sd, -; }
 { echo "list<<CONSUMERS_EOF"; printf '%s\n' "$list"; echo "CONSUMERS_EOF"; } >> "${GITHUB_OUTPUT:-/dev/null}"
 out manila "$(names Designblue-Manila)"
 out create "$(names designbluemanila-create)"

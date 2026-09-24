@@ -77,7 +77,13 @@ python3 "$ROOT/scripts/check-caller-contract.py" \
     "$work/.github/workflows/review.yml" "$work/caller-template.yml" "$work/tests/gates.golden" \
   || die "that commit's review.yml does not gate itself (or breaks the caller contract). Thin callers would loop on it — this is the release floor."
 ( cd "$work" && bash tests/run.sh >/dev/null ) || die "tests/run.sh fails at that commit (run it to see which)"
-( cd "$work" && actionlint -ignore 'property "workflow_sha" is not defined' .github/workflows/review.yml ) \
+# actionlint's bundled action metadata (1.7.12, the latest) predates create-github-app-token@v3,
+# which added `client-id` and made `app-id` optional and deprecated. These two ignores name
+# that action exactly, so every other input check still runs.
+( cd "$work" && actionlint -ignore 'property "workflow_sha" is not defined' \
+    -ignore 'input "client-id" is not defined in action "actions/create-github-app-token@v3"' \
+    -ignore 'missing input "app-id" which is required by action "actions/create-github-app-token@v3"' \
+    .github/workflows/review.yml ) \
   || die "actionlint fails at that commit"
 
 if [ "$mode" = canary ]; then

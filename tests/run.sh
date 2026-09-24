@@ -606,7 +606,8 @@ EOF
 cons >/dev/null
 check "list: section only, owners normalised, self + dupes + junk dropped" \
   "Designblue-Manila/brikk-inventory-v2 designbluemanila-create/kaimana-siargao-site@staging Designblue-Manila/Brikk-Web" "$(list_out)"
-check "  ...token scopes per account"               "brikk-inventory-v2,Brikk-Web/kaimana-siargao-site" "$(out manila)/$(out create)"
+# byte order (LC_ALL=C), so capitals first on every machine
+check "  ...token scopes per account"               "Brikk-Web,brikk-inventory-v2/kaimana-siargao-site" "$(out manila)/$(out create)"
 check "  ...ignored lines are warned about"         1 "$(grep -c '4 line(s) under' "$STUB_DIR/stdout")"
 fresh; printf '## Consumers\n- Designblue-Manila/a\n' > "$STUB_DIR/review-notes.md"
 cons HAS_KEY=false >/dev/null
