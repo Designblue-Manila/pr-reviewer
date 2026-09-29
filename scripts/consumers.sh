@@ -27,6 +27,8 @@
 #   manila  comma-separated repo names under Designblue-Manila      (for the token scope)
 #   create  comma-separated repo names under designbluemanila-create
 #   note    one line for the prompt when nothing will be checked out, saying why
+#   skipped manifest lines for the repos listed past the first $MAX: named as NOT READ, so a
+#           breaking change is never judged "checked" on the first five alone
 set -uo pipefail
 
 GH="${GH:-gh}"
@@ -49,7 +51,7 @@ fi
 
 # the `## Consumers` section, up to the next heading. Only list items that are a plain
 # owner/repo[@ref] in one of our two accounts count; anything else is ignored, and said so.
-list="" ignored=0 n=0
+list="" skipped="" ignored=0 n=0
 in=0
 while IFS= read -r line || [ -n "$line" ]; do
   if printf '%s' "$line" | grep -qiE '^#{1,3}[[:space:]]'; then
@@ -74,18 +76,26 @@ while IFS= read -r line || [ -n "$line" ]; do
   # one checkout per repository: a second line for it (another @branch) would overwrite the first
   printf '%s\n' "$list" | sed 's/@.*//' | grep -qixF "$owner/$repo" && continue
   if [ "$n" -ge "$MAX" ]; then
-    echo "::warning::More than $MAX consumers listed; only the first $MAX are checked out."; break
+    printf '%s\n' "$skipped" | grep -qixF "$owner/$repo" && continue
+    skipped="${skipped:+$skipped
+}$owner/$repo"; continue
   fi
   list="${list:+$list
 }$owner/$rest"; n=$((n+1))
 done < "$T/review-notes.md"
+if [ -n "$skipped" ]; then
+  echo "::warning::More than $MAX consumers listed; only the first $MAX are checked out, the rest are named as NOT READ."
+  { echo "skipped<<SKIPPED_EOF"
+    printf '%s\n' "$skipped" | sed "s/\$/: NOT READ (listed after the first $MAX; only $MAX consumers are checked out per review)/; s/^/- /"
+    echo "SKIPPED_EOF"; } >> "${GITHUB_OUTPUT:-/dev/null}"
+fi
 [ "$ignored" -gt 0 ] && echo "::warning::$ignored line(s) under '## Consumers' ignored: each must be owner/repo[@branch] in Designblue-Manila or designbluemanila-create."
 
 if [ -z "$list" ]; then
   out note "none listed (no '## Consumers' section in .github/REVIEW-NOTES.md on $NOTES_REF)"; exit 0
 fi
 if [ "$HAS_KEY" != true ]; then
-  out note "listed but NOT checked out — this repository has no PR_REVIEWER_APP_KEY secret: $(printf '%s' "$list" | paste -sd, - | sed 's/,/, /g')"
+  out note "listed but NOT checked out — this repository has no PR_REVIEWER_APP_KEY secret: $(printf '%s\n%s' "$list" "$skipped" | sed '/^$/d' | paste -sd, - | sed 's/,/, /g')"
   exit 0
 fi
 
