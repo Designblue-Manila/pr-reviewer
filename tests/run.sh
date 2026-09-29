@@ -370,6 +370,21 @@ rc=$(guard)
 check "withdrawal refused by GitHub -> RED, and says so in the PR" "1/1" "$rc/$(posted)"
 fresh; touch "$STUB_DIR/api-fail"
 check "reviews unreadable -> RED (cannot prove no bad approval exists)" "1" "$(guard)"
+fresh; echo "[$(rv 'claude[bot]' newhead APPROVED 2026-09-23T10:05:00Z 43)]" > "$STUB_DIR/reviews.json"
+check "a NEWER run approved the new head after this run's review stopped -> left alone (eval N01)" "0/0/0" \
+      "$(guard UNTIL=2026-09-23T10:02:00Z)/$(dismissed)/$(posted)"
+fresh; echo "[$(rv 'claude[bot]' newhead APPROVED 2026-09-23T10:01:30Z 44)]" > "$STUB_DIR/reviews.json"
+check "this run's OWN approval landed on the wrong head -> still withdrawn (eval N02)" "0/1" \
+      "$(guard UNTIL=2026-09-23T10:02:00Z)/$(grep -c 'reviews/44/dismissals' "$STUB_LOG")"
+fresh; echo "[$(rv 'claude[bot]' newhead APPROVED 2026-09-23T10:02:40Z 45)]" > "$STUB_DIR/reviews.json"
+check "  ...within the clock-skew grace after the review stopped -> still withdrawn" "0/1" \
+      "$(guard UNTIL=2026-09-23T10:02:00Z)/$(grep -c 'reviews/45/dismissals' "$STUB_LOG")"
+fresh; echo "[$(rv 'claude[bot]' newhead APPROVED 2026-09-23T11:00:00Z 46)]" > "$STUB_DIR/reviews.json"
+check "  ...an unreadable stop time -> no end to the window, as before" "0/1" \
+      "$(guard UNTIL=not-a-time)/$(grep -c 'reviews/46/dismissals' "$STUB_LOG")"
+fresh; echo "[$(rv 'claude[bot]' newhead APPROVED 2026-09-23T10:01:00Z 47),$(rv 'claude[bot]' newhead APPROVED 2026-09-23T10:06:00Z 48)]" > "$STUB_DIR/reviews.json"; touch "$STUB_DIR/dismiss-fail"
+check "  ...own wrong-head approval GitHub will not dismiss -> RED; the newer run's is not touched" "1/1/0" \
+      "$(guard UNTIL=2026-09-23T10:02:00Z)/$(grep -c 'reviews/47/dismissals' "$STUB_LOG")/$(grep -c 'reviews/48/dismissals' "$STUB_LOG")"
 
 echo "respond-withdraw.sh (the reply cannot approve; it can pull an approval)"
 wd() { # env assignments as args
@@ -615,6 +630,22 @@ check "listed but no app key -> no list, a note that says so" "/listed but NOT c
 fresh; { echo '## Consumers'; for i in 1 2 3 4 5 6 7; do echo "- Designblue-Manila/r$i"; done; } > "$STUB_DIR/review-notes.md"
 cons >/dev/null
 check "more than 5 -> first 5 only, warned"         "5/1" "$(list_out | wc -w | tr -d ' ')/$(grep -c 'More than 5' "$STUB_DIR/stdout")"
+skipped_out() { sed -n '/^skipped<<SKIPPED_EOF$/,/^SKIPPED_EOF$/p' "$GITHUB_OUTPUT" | sed '1d;$d'; }
+check "  ...the rest are NAMED as not read, for the prompt (eval N03)" \
+  "- Designblue-Manila/r6: NOT READ (listed after the first 5; only 5 consumers are checked out per review)|- Designblue-Manila/r7: NOT READ (listed after the first 5; only 5 consumers are checked out per review)" \
+  "$(skipped_out | paste -sd'|' -)"
+fresh; { echo '## Consumers'; for i in 1 2 3 4 5 6 6 7; do echo "- Designblue-Manila/r$i"; done; echo "- Designblue-Manila/r6@dev"; } > "$STUB_DIR/review-notes.md"
+cons >/dev/null
+check "  ...a repo listed twice past the limit is named once" "2" "$(skipped_out | wc -l | tr -d ' ')"
+fresh; { echo '## Consumers'; for i in 1 2 3 4 5; do echo "- Designblue-Manila/r$i"; done; } > "$STUB_DIR/review-notes.md"
+cons >/dev/null
+check "exactly 5 -> all checked out, nothing skipped, no warning" "5//0" \
+  "$(list_out | wc -w | tr -d ' ')/$(skipped_out)/$(grep -c 'More than 5' "$STUB_DIR/stdout")"
+fresh; { echo '## Consumers'; for i in 1 2 3 4 5 6 7; do echo "- Designblue-Manila/r$i"; done; } > "$STUB_DIR/review-notes.md"
+cons HAS_KEY=false >/dev/null
+check "no app key and more than 5 -> the note names all of them" \
+  "listed but NOT checked out — this repository has no PR_REVIEWER_APP_KEY secret: Designblue-Manila/r1, Designblue-Manila/r2, Designblue-Manila/r3, Designblue-Manila/r4, Designblue-Manila/r5, Designblue-Manila/r6, Designblue-Manila/r7" \
+  "$(out note)"
 
 echo "clone-consumers.sh (read-only copies, token revoked, no .git left behind)"
 if git --version >/dev/null 2>&1; then
