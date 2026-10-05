@@ -31,7 +31,7 @@ on:
       model:
         description: Claude model used for the review
         type: string
-        default: claude-opus-5
+        default: claude-opus-5-5
       max_turns:
         description: >-
           Upper bound on agent turns for one review. 60 was not enough for a large PR:
