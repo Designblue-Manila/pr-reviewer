@@ -204,6 +204,34 @@ fresh; printf '%s' '[{"body":"<!-- pr-reviewer:no-review:0ldsha -->\nolder commi
 check "announcement for an OLDER commit does not silence this one" "1/1" "$(verdict)/$(posted)"
 fresh; verdict >/dev/null; first="$(head -c 4 "$STUB_DIR/posted.1")"
 check "comment body starts at column 0 (indented = rendered as code)" "<!--" "$first"
+# The reviewer's record of the run (EXEC_FILE) gives the real reason (a 59-file PR, 14 Oct 2026).
+record() { # turns, denials-json -> a claude-code-action execution file (JSON array)
+  jq -n --argjson t "$1" --argjson d "$2" \
+    '[{type:"system",subtype:"init"},{type:"assistant"},{type:"result",subtype:"success",num_turns:$t,permission_denials:$d}]' \
+    > "$STUB_DIR/exec.json"; }
+fresh; record 25 '[{"tool_name":"Bash","tool_input":{"command":"cat composer.json | jq ."}},{"tool_name":"Bash","tool_input":{"command":"php -l app/X.php"}}]'
+rc=$(verdict EXEC_FILE="$STUB_DIR/exec.json")
+check "ran, no verdict, record present -> RED, turns + refusals named, not 'declined to run'" "1/1/1/1/0" \
+      "$rc/$(grep -c 'ran for 25 of 120 turns' "$STUB_DIR/posted.1")/$(grep -c 'refused 2 action' "$STUB_DIR/posted.1")/$(grep -c 'Bash: php -l app/X.php' "$STUB_DIR/posted.1")/$(grep -c 'declined to run' "$STUB_DIR/posted.1")"
+check "... and the red check's message carries the same reason" "1" "$(grep -c '::error::.*refused 2 action' "$STUB_DIR/stdout")"
+check "... and points at the saved record" "1" "$(grep -c 'review-record' "$STUB_DIR/posted.1")"
+fresh; record 9 '[{"tool_name":"Bash","tool_input":{"command":"echo ```\nGOTCHA"}}]'
+verdict EXEC_FILE="$STUB_DIR/exec.json" >/dev/null
+check "a refused command cannot break out of its code block (backticks, newlines flattened)" "2/0" \
+      "$(grep -c '^```' "$STUB_DIR/posted.1")/$(grep -c '^GOTCHA' "$STUB_DIR/posted.1")"
+fresh; record 12 '[]'; jq -c '.[]' "$STUB_DIR/exec.json" > "$STUB_DIR/exec.jsonl"
+verdict EXEC_FILE="$STUB_DIR/exec.jsonl" >/dev/null
+check "one-message-per-line record is read too; no refusals -> no refused list" "1/0" \
+      "$(grep -c 'ran for 12 of 120 turns but ended without posting a verdict' "$STUB_DIR/posted.1")/$(grep -c 'What it was refused' "$STUB_DIR/posted.1")"
+fresh; record 120 '[]'
+verdict EXEC_FILE="$STUB_DIR/exec.json" REVIEW_RESULT=failure >/dev/null
+check "crashed with a record -> 'stopped ... after 120 of 120 turns'" "1" "$(grep -c 'stopped before reaching a verdict after 120 of 120 turns' "$STUB_DIR/posted.1")"
+fresh; printf 'not json' > "$STUB_DIR/exec.json"
+rc=$(verdict EXEC_FILE="$STUB_DIR/exec.json")
+check "unreadable record -> falls back to 'declined to run', still RED" "1/1" "$rc/$(grep -c 'declined to run' "$STUB_DIR/posted.1")"
+fresh; record 25 '[]'; export GITHUB_STEP_SUMMARY="$STUB_DIR/summary.md"
+verdict EXEC_FILE="$STUB_DIR/exec.json" >/dev/null; unset GITHUB_STEP_SUMMARY
+check "the reason is written to the job summary" "1" "$(grep -c 'ended without posting a verdict' "$STUB_DIR/summary.md")"
 
 echo "build.sh (npm, php and composer are stubs; nothing is installed or run for real)"
 # bproj <file>=<content> ...   -> a fresh project folder with those files, stubs on PATH

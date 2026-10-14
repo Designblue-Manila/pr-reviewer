@@ -352,6 +352,7 @@ jobs:
         run: bash .pr-reviewer/scripts/clone-consumers.sh
 
       - name: Review
+        id: review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -578,6 +579,20 @@ jobs:
         if: ${{ always() }}
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
+      # The reviewer's own record of the run: every step it took and every action it was
+      # refused. Without it a run that ends quietly cannot be explained (a 59-file PR,
+      # 14 Oct 2026: 25 turns, 6 refusals, no verdict, nothing to read afterwards).
+      # Holds code the reviewer read, so it stays with the run, readable by whoever can read
+      # this repository, and expires.
+      - name: Save the reviewer's record of this run
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-record-${{ github.run_attempt }}
+          path: ${{ steps.review.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
+          retention-days: 14
+          if-no-files-found: warn
+
       # Ask GitHub whether a verdict actually exists for this commit. When it does not:
       # say so in the PR and turn this check RED. The reasoning, and the two incidents
       # behind it, are at the top of scripts/verdict-check.sh.
@@ -636,6 +651,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TURNS: ${{ inputs.max_turns }}
           REVIEW_RESULT: ${{ job.status }}
+          EXEC_FILE: ${{ steps.review.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
         run: bash .pr-reviewer/scripts/verdict-check.sh
 
   respond:
