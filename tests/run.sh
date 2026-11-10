@@ -204,34 +204,79 @@ fresh; printf '%s' '[{"body":"<!-- pr-reviewer:no-review:0ldsha -->\nolder commi
 check "announcement for an OLDER commit does not silence this one" "1/1" "$(verdict)/$(posted)"
 fresh; verdict >/dev/null; first="$(head -c 4 "$STUB_DIR/posted.1")"
 check "comment body starts at column 0 (indented = rendered as code)" "<!--" "$first"
-# The reviewer's record of the run (EXEC_FILE) gives the real reason (a 59-file PR, 14 Oct 2026).
+# The summary of the reviewer's run (RUN_SUMMARY) gives the real reason (a 59-file PR, 14 Oct 2026).
 record() { # turns, denials-json -> a claude-code-action execution file (JSON array)
   jq -n --argjson t "$1" --argjson d "$2" \
-    '[{type:"system",subtype:"init"},{type:"assistant"},{type:"result",subtype:"success",num_turns:$t,permission_denials:$d}]' \
+    '[{type:"system",subtype:"init"},{type:"assistant"},{type:"result",subtype:"success",is_error:false,num_turns:$t,result:"stopped",permission_denials:$d}]' \
     > "$STUB_DIR/exec.json"; }
+summarise() { # [exec file] -> $RUNNER_TEMP/review-summary.json, as the workflow step does
+  env EXEC_FILE="${1:-$STUB_DIR/exec.json}" OUT="$RUNNER_TEMP/review-summary.json" TURNS=120 \
+      bash "$ROOT/scripts/review-summary.sh" > "$STUB_DIR/summary.out" 2>&1
+  echo $?; }
+S() { echo "$RUNNER_TEMP/review-summary.json"; }
 fresh; record 25 '[{"tool_name":"Bash","tool_input":{"command":"cat composer.json | jq ."}},{"tool_name":"Bash","tool_input":{"command":"php -l app/X.php"}}]'
-rc=$(verdict EXEC_FILE="$STUB_DIR/exec.json")
-check "ran, no verdict, record present -> RED, turns + refusals named, not 'declined to run'" "1/1/1/1/0" \
+summarise >/dev/null; rc=$(verdict RUN_SUMMARY="$(S)")
+check "ran, no verdict, summary present -> RED, turns + refusals named, not 'declined to run'" "1/1/1/1/0" \
       "$rc/$(grep -c 'ran for 25 of 120 turns' "$STUB_DIR/posted.1")/$(grep -c 'refused 2 action' "$STUB_DIR/posted.1")/$(grep -c 'Bash: php -l app/X.php' "$STUB_DIR/posted.1")/$(grep -c 'declined to run' "$STUB_DIR/posted.1")"
 check "... and the red check's message carries the same reason" "1" "$(grep -c '::error::.*refused 2 action' "$STUB_DIR/stdout")"
-check "... and points at the saved record" "1" "$(grep -c 'review-record' "$STUB_DIR/posted.1")"
-fresh; record 9 '[{"tool_name":"Bash","tool_input":{"command":"echo ```\nGOTCHA"}}]'
-verdict EXEC_FILE="$STUB_DIR/exec.json" >/dev/null
-check "a refused command cannot break out of its code block (backticks, newlines flattened)" "2/0" \
-      "$(grep -c '^```' "$STUB_DIR/posted.1")/$(grep -c '^GOTCHA' "$STUB_DIR/posted.1")"
+check "... and points at the saved summary" "1" "$(grep -c 'review-summary' "$STUB_DIR/posted.1")"
+check "... and the summary records that no verdict was posted" "false" "$(jq -r '.verdict_posted' "$(S)")"
+fresh; record 9 '[{"tool_name":"Bash","tool_input":{"command":"echo ```GOTCHA``` && echo `whoami`"}}]'
+summarise >/dev/null; verdict RUN_SUMMARY="$(S)" >/dev/null
+check "a refused command cannot break out of its code block (backticks flattened)" "2/0" \
+      "$(grep -c '^```' "$STUB_DIR/posted.1")/$(grep -c 'GOTCHA```' "$STUB_DIR/posted.1")"
 fresh; record 12 '[]'; jq -c '.[]' "$STUB_DIR/exec.json" > "$STUB_DIR/exec.jsonl"
-verdict EXEC_FILE="$STUB_DIR/exec.jsonl" >/dev/null
+summarise "$STUB_DIR/exec.jsonl" >/dev/null; verdict RUN_SUMMARY="$(S)" >/dev/null
 check "one-message-per-line record is read too; no refusals -> no refused list" "1/0" \
       "$(grep -c 'ran for 12 of 120 turns but ended without posting a verdict' "$STUB_DIR/posted.1")/$(grep -c 'What it was refused' "$STUB_DIR/posted.1")"
-fresh; record 120 '[]'
-verdict EXEC_FILE="$STUB_DIR/exec.json" REVIEW_RESULT=failure >/dev/null
-check "crashed with a record -> 'stopped ... after 120 of 120 turns'" "1" "$(grep -c 'stopped before reaching a verdict after 120 of 120 turns' "$STUB_DIR/posted.1")"
+fresh; record 120 '[]'; summarise >/dev/null
+verdict RUN_SUMMARY="$(S)" REVIEW_RESULT=failure >/dev/null
+check "crashed with a summary -> 'stopped ... after 120 of 120 turns'" "1" "$(grep -c 'stopped before reaching a verdict after 120 of 120 turns' "$STUB_DIR/posted.1")"
 fresh; printf 'not json' > "$STUB_DIR/exec.json"
-rc=$(verdict EXEC_FILE="$STUB_DIR/exec.json")
-check "unreadable record -> falls back to 'declined to run', still RED" "1/1" "$rc/$(grep -c 'declined to run' "$STUB_DIR/posted.1")"
-fresh; record 25 '[]'; export GITHUB_STEP_SUMMARY="$STUB_DIR/summary.md"
-verdict EXEC_FILE="$STUB_DIR/exec.json" >/dev/null; unset GITHUB_STEP_SUMMARY
+check "unreadable record -> no summary written, step still exits 0" "0/no" "$(summarise)/$([ -e "$(S)" ] && echo yes || echo no)"
+rc=$(verdict RUN_SUMMARY="$(S)")
+check "... -> falls back to 'declined to run', still RED" "1/1" "$rc/$(grep -c 'declined to run' "$STUB_DIR/posted.1")"
+fresh
+check "no record at all -> no summary, exits 0" "0/no" "$(summarise "$STUB_DIR/missing.json")/$([ -e "$(S)" ] && echo yes || echo no)"
+fresh; jq -n '[{type:"system"},{type:"assistant"}]' > "$STUB_DIR/exec.json"
+check "record with no result message (cut off) -> no summary" "0/no" "$(summarise)/$([ -e "$(S)" ] && echo yes || echo no)"
+fresh; printf '["a","b"]' > "$(S)"; rc=$(verdict RUN_SUMMARY="$(S)")
+check "a summary that is not the expected shape -> 'declined to run', still RED" "1/1" "$rc/$(grep -c 'declined to run' "$STUB_DIR/posted.1")"
+fresh; record 25 '[]'; summarise >/dev/null; export GITHUB_STEP_SUMMARY="$STUB_DIR/summary.md"
+verdict RUN_SUMMARY="$(S)" >/dev/null; unset GITHUB_STEP_SUMMARY
 check "the reason is written to the job summary" "1" "$(grep -c 'ended without posting a verdict' "$STUB_DIR/summary.md")"
+fresh; review 'claude[bot]' abc123 APPROVED > "$STUB_DIR/reviews.json"; record 30 '[]'; summarise >/dev/null
+check "verdict present -> green, silent, summary records verdict_posted: true" "0/0/true" "$(verdict RUN_SUMMARY="$(S)")/$(posted)/$(jq -r '.verdict_posted' "$(S)")"
+
+echo "review-summary.sh (what is uploaded must not carry file contents)"
+# The record holds every tool result: the text of each file the reviewer opened, consumer
+# repositories included. None of it may reach the uploaded summary (pr-reviewer#26 review).
+fresh
+jq -n --arg long "$(printf 'x%.0s' $(seq 1 500))" '[
+  {type:"system",subtype:"init"},
+  {type:"assistant",message:{content:[{type:"tool_use",name:"Read",input:{file_path:"/c/app/Secret.php"}}]}},
+  {type:"user",message:{content:[{type:"tool_result",content:"<?php SECRET_FILE_BODY"}]}},
+  {type:"result",subtype:"success",is_error:false,num_turns:25,result:"I stopped.",permission_denials:[
+    {tool_name:"Bash",tool_input:{command:"cat > /tmp/x <<EOF\nSECRET_HEREDOC_BODY\nEOF",description:"SECRET_DESC"}},
+    {tool_name:"Write",tool_input:{file_path:"/tmp/copy.php",content:"SECRET_WRITE_CONTENT"}},
+    {tool_name:"Edit",tool_input:{file_path:"app/A.php",old_string:"SECRET_OLD",new_string:"SECRET_NEW"}},
+    {tool_name:"Bash",tool_input:{command:$long}},
+    {tool_name:"mcp__x__y",tool_input:{blob:"SECRET_UNKNOWN_FIELD"}}]}]' > "$STUB_DIR/exec.json"
+summarise >/dev/null
+check "no tool result, file content, heredoc body or unknown field reaches the summary" "0" "$(grep -c SECRET "$(S)")"
+check "exactly the documented fields" "is_error,max_turns,outcome,refused,refused_count,result,turns_used,verdict_posted" \
+      "$(jq -r 'keys | join(",")' "$(S)")"
+check "turns, budget, refusals counted" "25/120/5/success/false" "$(jq -r '"\(.turns_used)/\(.max_turns)/\(.refused_count)/\(.outcome)/\(.is_error)"' "$(S)")"
+check "a heredoc keeps only its first line" "cat > /tmp/x <<EOF …" "$(jq -r '.refused[0].input' "$(S)")"
+check "Write / Edit keep only the path" "/tmp/copy.php|app/A.php" "$(jq -r '"\(.refused[1].input)|\(.refused[2].input)"' "$(S)")"
+check "a long command is cut to 200 characters" "202" "$(jq -r '.refused[3].input | length' "$(S)")"
+check "the final message is kept, cut to 1000" "I stopped." "$(jq -r '.result' "$(S)")"
+fresh; jq -n '[{type:"result",num_turns:3,result:("y" * 5000),permission_denials:[range(80) | {tool_name:"Bash",tool_input:{command:"ls"}}]}]' > "$STUB_DIR/exec.json"
+summarise >/dev/null
+check "long final message and 80 refusals -> 1002 chars, 50 kept, 80 counted" "1002/50/80" \
+      "$(jq -r '"\(.result | length)/\(.refused | length)/\(.refused_count)"' "$(S)")"
+check "review.yml uploads only the summary, never the execution file" "1/0" \
+      "$(grep -c 'path: \${{ runner.temp }}/review-summary.json' "$ROOT/.github/workflows/review.yml")/$(grep -cE 'path: .*(execution_file|claude-execution-output)' "$ROOT/.github/workflows/review.yml")"
 
 echo "build.sh (npm, php and composer are stubs; nothing is installed or run for real)"
 # bproj <file>=<content> ...   -> a fresh project folder with those files, stubs on PATH

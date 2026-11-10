@@ -17,13 +17,14 @@
 # which notifies the author, and a red `review` check, which is what they see in the merge
 # box. Until 21 Sep 2026 the skip case commented and then stayed green.
 #
-# The reason it gives comes from the reviewer's own record of the run (EXEC_FILE, written by
-# claude-code-action) when there is one. Until 14 Oct 2026 a green job with no verdict was
-# always called "declined to run", so a run that read 25 turns, was refused 6 actions and
-# stopped (a 59-file PR) was explained as a PR editing the review workflow.
+# The reason it gives comes from the summary of the reviewer's run (RUN_SUMMARY, written by
+# review-summary.sh from claude-code-action's record) when there is one. Until 14 Oct 2026
+# a green job with no verdict was always called "declined to run", so a run that read 25
+# turns, was refused 6 actions and stopped (a 59-file PR) was explained as a PR editing the
+# review workflow. Whether a verdict was found is written back into that summary.
 #
 # Env in: GH_TOKEN PR REPO HEAD_SHA RUN_URL TURNS REVIEW_RESULT RUNNER_TEMP
-#         EXEC_FILE (optional: the reviewer's record of the run)
+#         RUN_SUMMARY (optional: review-summary.sh's summary of the run)
 #         GH (optional: the gh binary, so tests can substitute a stub)
 set -euo pipefail
 
@@ -34,6 +35,16 @@ GH="${GH:-gh}"
 # single integer so the numeric tests below cannot blow up under `set -e`. A failed call
 # reads as zero and therefore announces, which is the safe direction.
 count() { tr -cd '0-9\n' | awk '{s+=$1} END {print s+0}'; }
+
+# Record the outcome in the run summary (uploaded after this step). Best effort.
+note_verdict() {
+  [ -n "${RUN_SUMMARY:-}" ] && [ -s "$RUN_SUMMARY" ] || return 0
+  if jq --argjson v "$1" '.verdict_posted = $v' "$RUN_SUMMARY" > "$RUN_SUMMARY.tmp" 2>/dev/null; then
+    mv "$RUN_SUMMARY.tmp" "$RUN_SUMMARY" || true
+  else
+    rm -f "$RUN_SUMMARY.tmp"
+  fi
+}
 
 # A verdict counts only if it is the bot's AND it is about THIS commit. A stale approval
 # from an earlier push must not vouch for code nobody has read.
@@ -46,31 +57,27 @@ verdict="$("$GH" api "repos/$REPO/pulls/$PR/reviews" --paginate \
 
 if [ "${verdict:-0}" -gt 0 ]; then
   echo "Verdict present for $HEAD_SHA — nothing to announce."
+  note_verdict true
   exit 0
 fi
 
 echo "No claude[bot] verdict for $HEAD_SHA (job status: ${REVIEW_RESULT:-unknown})."
+note_verdict false
 
-# What the record says. The file is a JSON array of messages (or one per line); the last
-# `result` message carries the turn count and every refused action. Anything unreadable
-# leaves `ran` empty, which falls back to the older wording below.
+# What the summary says (review-summary.sh: turns, and each refused action as one short
+# line). No summary, or an unreadable one, leaves `ran` empty: the older wording below.
 ran="" turns_used="" refused=0 refused_list=""
-if [ -n "${EXEC_FILE:-}" ] && [ -s "$EXEC_FILE" ]; then
-  result="$(jq -cs 'if length == 1 and (.[0] | type) == "array" then .[0] else . end
-                    | map(select(type == "object" and .type == "result")) | last // empty' \
-            "$EXEC_FILE" 2>/dev/null || true)"
-  if [ -n "$result" ] && [ "$result" != "null" ]; then
-    ran=1
-    turns_used="$(jq -r '.num_turns // empty' <<<"$result")"
-    refused="$(jq -r '(.permission_denials // []) | length' <<<"$result")"
-    # One line per refused action, at most 10. Backticks and newlines are flattened so a
-    # command cannot break out of the code block it is shown in.
-    refused_list="$(jq -r '(.permission_denials // [])[:10][]
-        | (.tool_name // "?") + ": "
-          + ((.tool_input.command // .tool_input.file_path // .tool_input.pattern // .tool_input.url
-              // (.tool_input | tostring)) | tostring)
-        | gsub("[`\\r\\n]"; " ") | .[:160]' <<<"$result" 2>/dev/null || true)"
-  fi
+if [ -n "${RUN_SUMMARY:-}" ] && [ -s "$RUN_SUMMARY" ] \
+   && jq -e 'type == "object" and has("refused")' "$RUN_SUMMARY" >/dev/null 2>&1; then
+  ran=1
+  turns_used="$(jq -r '.turns_used // empty' "$RUN_SUMMARY" 2>/dev/null || true)"
+  refused="$(jq -r '.refused_count // (.refused | length) // 0' "$RUN_SUMMARY" 2>/dev/null || echo 0)"
+  refused="${refused//[^0-9]/}"; refused="${refused:-0}"
+  # One line per refused action, at most 10. Backticks and newlines are flattened so a
+  # command cannot break out of the code block it is shown in.
+  refused_list="$(jq -r '(.refused // [])[:10][]
+      | ((.tool // "?") | tostring) + ": " + ((.input // "") | tostring)
+      | gsub("[`\\r\\n]"; " ") | .[:200]' "$RUN_SUMMARY" 2>/dev/null || true)"
 fi
 
 # One plain sentence, used in the comment, the job summary and the red check's message.
@@ -112,7 +119,7 @@ if [ "${have:-0}" -eq 0 ]; then
       printf 'workflow itself, which it is not allowed to review — so this diff needs a human '
       printf 'before it merges.\n\n'
     fi
-    printf '[Run log](%s) · The reviewer'"'"'s full record is saved on that page as `review-record`. ' "${RUN_URL:-}"
+    printf '[Run log](%s) · A summary of the run (turns, refused actions) is saved on that page as `review-summary`. ' "${RUN_URL:-}"
     printf 'Push a change to re-run, or ask a human to review before merging.\n'
   } > "$RUNNER_TEMP/no-review.md"
   "$GH" pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/no-review.md" \
