@@ -352,6 +352,7 @@ jobs:
         run: bash .pr-reviewer/scripts/clone-consumers.sh
 
       - name: Review
+        id: review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -578,6 +579,20 @@ jobs:
         if: ${{ always() }}
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
+      # A few facts from the reviewer's own record of the run: turns used, its final message,
+      # and each action it was refused (one short line each). Without them a run that ends
+      # quietly cannot be explained (a 59-file PR, 14 Oct 2026: 25 turns, 6 refusals, no
+      # verdict, nothing to read afterwards). The record itself is never uploaded: it holds
+      # the text of every file the reviewer read, consumer repositories included, which
+      # readers of this repository may not be allowed to see. review-summary.sh says what is kept.
+      - name: Summarise the reviewer's run
+        if: ${{ always() }}
+        env:
+          EXEC_FILE: ${{ steps.review.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
+          OUT: ${{ runner.temp }}/review-summary.json
+          TURNS: ${{ inputs.max_turns }}
+        run: bash .pr-reviewer/scripts/review-summary.sh
+
       # Ask GitHub whether a verdict actually exists for this commit. When it does not:
       # say so in the PR and turn this check RED. The reasoning, and the two incidents
       # behind it, are at the top of scripts/verdict-check.sh.
@@ -636,7 +651,19 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TURNS: ${{ inputs.max_turns }}
           REVIEW_RESULT: ${{ job.status }}
+          RUN_SUMMARY: ${{ runner.temp }}/review-summary.json
         run: bash .pr-reviewer/scripts/verdict-check.sh
+
+      # The summary above (with whether a verdict was found), never the record it came from.
+      # always(): the verdict check fails this job exactly when the summary is wanted.
+      - name: Save the summary of this run
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-summary-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-summary.json
+          retention-days: 14
+          if-no-files-found: warn
 
   respond:
     name: respond
